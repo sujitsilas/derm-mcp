@@ -1,0 +1,104 @@
+# Curated signature sets for skin.enrich.score_signature / score_panel.
+#
+# Mouse casing is authoritative; human versions are derived through the shipped
+# ortholog table at load time (knowledge.get_geneset(..., organism="human")),
+# not by .upper().
+
+panels:
+  skin_wound_v1:
+    description: >-
+      The standard readout panel for burn/wound skin myeloid work: metabolic
+      state, interferon axis, inflammation, and repair/remodeling programs.
+    signatures: [glycolysis, oxphos, hypoxia, ifn_type1, ifn_type2, cgas_sting,
+                 inflammation, resolution_repair, lam_sam, phagocytosis,
+                 efferocytosis, ecm_remodeling, proliferation]
+  keratinocyte_v1:
+    description: Epidermal differentiation and wound-activated keratinocyte states.
+    signatures: [cornification, wound_keratinocyte, epidermal_proliferation]
+  fibroblast_v1:
+    description: Fibroblast activation and matrix programs.
+    signatures: [ecm_remodeling, myofibroblast, inflammatory_fibroblast]
+
+signatures:
+  glycolysis:
+    genes: [Hk1, Hk2, Gpi1, Pfkl, Pfkp, Aldoa, Tpi1, Gapdh, Pgk1, Pgam1, Eno1,
+            Pkm, Ldha, Slc2a1, Slc16a3, Pdk1, Hif1a]
+    source: HALLMARK_GLYCOLYSIS core + canonical glycolytic enzymes
+  oxphos:
+    genes: [Ndufa1, Ndufa4, Ndufb2, Ndufs1, Sdha, Sdhb, Uqcrc1, Uqcrc2, Cox4i1,
+            Cox5a, Cox6a1, Cox7a2, Atp5f1a, Atp5f1b, Atp5mc1, Cycs]
+    source: HALLMARK_OXIDATIVE_PHOSPHORYLATION core
+  hypoxia:
+    genes: [Hif1a, Vegfa, Slc2a1, Ldha, Pgk1, Ca9, Adm, Bnip3, Ndrg1, Egln3, Ero1a, Aldoa]
+    source: HALLMARK_HYPOXIA core
+  ifn_type1:
+    genes: [Isg15, Ifit1, Ifit2, Ifit3, Rsad2, Irf7, Stat1, Stat2, Oasl2, Oas1a,
+            Mx1, Mx2, Usp18, Ifi44, Cmpk2, Bst2, Ifih1, Ddx58]
+    source: Type-I interferon response (reference cell 99 core + canonical ISGs)
+  ifn_type2:
+    genes: [Cxcl9, Cxcl10, Cxcl11, Gbp2, Gbp3, Gbp5, Ciita, Stat1, Irf1, Socs1,
+            Nos2, Tap1, Psmb8, Psmb9, H2-Aa, H2-Ab1]
+    source: Type-II (IFN-gamma) response
+  cgas_sting:
+    genes: [Cgas, Tmem173, Tbk1, Irf3, Ikbke, Trex1, Ifi204, Zbp1, Nlrc3]
+    source: cGAS-STING cytosolic DNA sensing
+  inflammation:
+    genes: [Il1b, Il6, Tnf, Ccl2, Ccl3, Ccl4, Cxcl1, Cxcl2, Ptgs2, Nfkbia, Nfkb1,
+            Sod2, Traf1, Icam1, Sele, Serpine1, Socs3]
+    source: Union of HALLMARK_INFLAMMATORY_RESPONSE / TNFA_SIGNALING_VIA_NFKB / IL6_JAK_STAT3 (reference cell 99)
+  resolution_repair:
+    genes: [Mrc1, Cd163, Retnla, Chil3, Arg1, Il10, Tgfb1, Igf1, Pdgfb, Vegfa,
+            Timp1, Timp2, Mertk, Gas6, Anxa1, Alox15]
+    source: Resolution / pro-repair macrophage program
+  lam_sam:
+    genes: [Trem2, Gpnmb, Cd9, Cd63, Spp1, Lpl, Fabp5, Ctsd, Ctsb, Ctsk, Lgals3,
+            Apoe, Lipa, Acp5, Atp6v0d2]
+    source: >-
+      Lipid-associated / scar-associated macrophages (Jaitin Cell 2019,
+      Ramachandran Nature 2019, Hill Cell 2018)
+  phagocytosis:
+    genes: [Fcgr1, Fcgr3, Fcgr2b, Itgam, Itgb2, C1qa, C1qb, C3ar1, C5ar1, Msr1,
+            Marco, Cd36, Scarb1, Mrc1]
+    source: Fc/complement/scavenger-mediated uptake
+  efferocytosis:
+    genes: [Mertk, Gas6, Axl, Timd4, Anxa1, Cd300lf, Stab1, Stab2, Abca1, Abcg1,
+            Nr1h3, Pparg]
+    source: Apoptotic-cell clearance and downstream lipid handling
+  ecm_remodeling:
+    genes: [Mmp2, Mmp3, Mmp9, Mmp12, Mmp13, Mmp14, Timp1, Timp2, Timp3, Ctsk,
+            Ctss, Plau, Plaur, Serpine1, Lox, Loxl2, Postn, Tnc, Fn1, Thbs1, Thbs2]
+    source: Matrix turnover in wound repair
+  proliferation:
+    genes: [Mki67, Top2a, Stmn1, Birc5, Cdk1, Ccnb1, Ccnb2, Ube2c, Tyms, Rrm2, Pcna]
+    source: Cell cycle
+  cornification:
+    genes: [Lor, Flg, Ivl, Sbsn, Krtdap, Cnfn, Tgm1, Tgm3, Casp14, Klk7, Spink5]
+    source: Terminal keratinocyte differentiation
+  wound_keratinocyte:
+    genes: [Krt6a, Krt6b, Krt16, Krt17, Sprr1a, Sprr1b, S100a8, S100a9, Il1f9,
+            Slpi, Lcn2, Mmp9, Serpinb3a]
+    source: Wound-activated / hyperproliferative keratinocyte state
+  epidermal_proliferation:
+    genes: [Krt5, Krt14, Mki67, Top2a, Col17a1, Itga6, Itgb1, Trp63]
+    source: Basal proliferative keratinocytes
+  myofibroblast:
+    genes: [Acta2, Tagln, Cnn1, Postn, Tnc, Lrrc15, Col11a1, Comp, Thbs4]
+    source: Contractile fibroblast state
+  inflammatory_fibroblast:
+    genes: [Ccl2, Ccl7, Cxcl1, Cxcl12, Il6, Il33, Ptgs2, Has1, Pi16, Cd34]
+    source: Cytokine-secreting dermal fibroblast state
+
+# Priors for skin.sub.pipeline on the myeloid compartment: the populations the
+# lab observes recurrently across skin datasets. These are PRIORS, offered to
+# skin.annotate.marker_report as candidate labels; they are never auto-applied.
+subtype_priors:
+  macrophage_skin_v1:
+    ordered_labels: ["Inf. Mono.", "Early MDM", "MΦ-Inf", "MΦ-Act", "MΦ-IFN/AS DCs",
+                     "LAM-I", "LAM-II", "LAM", "MΦ-Res/Rep"]
+    origin_grouping:
+      "Inflammatory Monocytes": ["Inf. Mono."]
+      "MΦ-Recruited":           ["Early MDM", "MΦ-Inf", "MΦ-Act", "MΦ-IFN/AS DCs", "LAM-I", "LAM-II", "LAM"]
+      "MΦ-Resident/Repair":     ["MΦ-Res/Rep"]
+    reference: >-
+      Origin-level gene lists derived from Davies, Jenkins, Allen & Taylor,
+      Nat Immunol 2013 (reference notebook cell 5).

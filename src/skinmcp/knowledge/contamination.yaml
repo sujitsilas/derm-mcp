@@ -1,0 +1,53 @@
+# Lineage-exclusive gene patterns, used by skin.annotate.regress_markers and by
+# the `exclude_gene_groups` argument on skin.integrate.preprocess / skin.de.*.
+#
+# READ THIS BEFORE USING IT: dropping genes from the feature space is NOT
+# decontamination. It stops contaminating genes from driving clusters and from
+# topping DE lists, but the contaminating COUNTS remain in the matrix and still
+# distort library sizes, size factors, and the neighbour graph. Real ambient
+# removal belongs upstream — see skin.qc.estimate_ambient (SoupX/DecontX) or
+# CellBender. Every tool that consumes this file repeats that warning in its
+# return value, deliberately.
+#
+# The `mouse` block reproduces get_contamination_genes() from the reference
+# notebook (cell 10) exactly.
+
+mouse:
+  collagen:  ['^Col\d+[a-z]{1,2}\d+$']
+  keratin:   ['^Krt(ap)?\d+']
+  muscle:    ['^(Acta2|Myh11|Tagln|Cnn\d+|Smtn|Des|Myl\d+|Tpm\d+|Cald\d+)']
+  cornified: ['^(Lor|Flg|Tchh|Sbsn|Krtdap|Cnfn)$']
+  ecm_misc:  ['^(Sparc|Fbln2|Tnn|Tnc|Dcn|Postn|Igfbp4|Fn1)$']
+  stress:    ['^(Vim|Fth1|Ftl1|Srgn)$']
+  mito:      ['^mt-']
+  ribo:      ['^Rp[sl]']
+  hb:        ['^Hb[ab]-']
+  # Not in the reference set; offered because dissociation-induced immediate
+  # early genes are a real confounder in enzymatically digested skin
+  # (van den Brink et al. Nat Methods 2017).
+  dissociation: ['^(Fos|Fosb|Jun|Junb|Jund|Egr1|Atf3|Hspa1a|Hspa1b|Hspb1|Socs3|Ier2|Ier3|Zfp36|Dusp1)$']
+  sex:       ['^(Xist|Tsix|Ddx3y|Eif2s3y|Uty|Kdm5d)$']
+
+human:
+  collagen:  ['^COL\d+[A-Z]{1,2}\d+$']
+  keratin:   ['^KRT(AP)?\d+']
+  muscle:    ['^(ACTA2|MYH11|TAGLN|CNN\d+|SMTN|DES|MYL\d+|TPM\d+|CALD\d+)']
+  cornified: ['^(LOR|FLG|TCHH|SBSN|KRTDAP|CNFN)$']
+  ecm_misc:  ['^(SPARC|FBLN2|TNN|TNC|DCN|POSTN|IGFBP4|FN1)$']
+  stress:    ['^(VIM|FTH1|FTL|SRGN)$']
+  mito:      ['^MT-']
+  ribo:      ['^RP[SL]']
+  hb:        ['^HB[ABDGQZ]\d?$', '^HBA\d$', '^HBB$']
+  dissociation: ['^(FOS|FOSB|JUN|JUNB|JUND|EGR1|ATF3|HSPA1A|HSPA1B|HSPB1|SOCS3|IER2|IER3|ZFP36|DUSP1)$']
+  sex:       ['^(XIST|TSIX|DDX3Y|EIF2S3Y|UTY|KDM5D|RPS4Y1)$']
+
+# Named bundles the tools default to, so a caller does not have to remember
+# which groups go together.
+presets:
+  # What the reference notebook removes before immune-cell DE.
+  immune_de: [collagen, keratin, muscle, ecm_misc, stress]
+  # Feature-space cleanup before HVG selection on a whole-skin object.
+  feature_space: [mito, ribo, hb]
+  # Aggressive: use when the ambient audit says keratin/collagen soup is high.
+  ambient_heavy: [collagen, keratin, cornified, ecm_misc, hb]
+  none: []

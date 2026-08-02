@@ -1,0 +1,107 @@
+[project]
+name = "skin-mcp"
+version = "0.1.0"
+description = "A modular MCP server for dermatology / skin single-cell RNA-seq analysis"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "Scumpia Lab" }]
+keywords = ["mcp", "scrna-seq", "dermatology", "skin", "bioinformatics"]
+
+dependencies = [
+    # --- MCP ---
+    "mcp>=2.0.0",
+    "pydantic>=2.7",
+    "typing-extensions>=4.10",
+    # --- core single-cell ---
+    "scanpy>=1.10",
+    "anndata>=0.10",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pandas>=2.1",
+    "h5py>=3.10",
+    "scikit-learn>=1.4",
+    "scikit-misc>=0.3",           # loess for seurat_v3 HVG
+    "statsmodels>=0.14",
+    # --- graph / clustering ---
+    "igraph>=0.11",
+    "leidenalg>=0.10",
+    "pynndescent>=0.5",
+    "umap-learn>=0.5",
+    # --- integration ---
+    "harmonypy>=0.0.9",
+    # --- DE / enrichment ---
+    "pydeseq2>=0.4.12",
+    "gseapy>=1.1",
+    "decoupler>=1.6",
+    # NOTE on doublets: we use scanpy's built-in `sc.pp.scrublet` re-implementation
+    # rather than the standalone `scrublet` package, which pulls in `annoy` and needs
+    # a C++ toolchain. scDblFinder (R bridge) remains the preferred caller.
+    # --- plotting ---
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    "adjustText>=1.1",
+    # --- misc ---
+    "pyyaml>=6.0",
+    "networkx>=3.2",
+    "nbformat>=5.9",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# Heavier / more brittle backends. Everything here has a documented fallback,
+# and its absence produces a typed error, never a traceback.
+atlas = ["celltypist>=1.6", "cellxgene-census>=1.15"]
+ccc = ["liana>=1.3"]
+traj = ["cellrank>=2.0"]
+full = [
+    "celltypist>=1.6",
+    "cellxgene-census>=1.15",
+    "liana>=1.3",
+    "cellrank>=2.0",
+    "doubletdetection>=4.2",
+    "scanorama>=1.7",
+    "bbknn>=1.6",
+    "scvi-tools>=1.1",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "jupyter-client>=8.6",
+    "ipykernel>=6.29",
+]
+
+[project.scripts]
+skin-mcp = "skinmcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# Non-Python data (knowledge/*.yaml, prompts/*.md, runtimes/r/*) lives inside the
+# package directory and is picked up automatically.
+packages = ["src/skinmcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "T20"]  # T20 = flake8-print, bans print()
+ignore = [
+    "E501",   # line length is handled by the formatter
+    "B008",   # function call in default arg
+    # zip() without strict=: several call sites deliberately zip a longer axes
+    # array against a shorter list of panels and stop at the shorter one.
+    "B905",
+    "UP031",  # %-formatting is clearer than .format() in the emitted code strings
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["T20"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]

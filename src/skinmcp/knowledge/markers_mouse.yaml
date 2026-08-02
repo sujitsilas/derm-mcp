@@ -1,0 +1,138 @@
+# Mouse skin lineage marker sets.
+#
+# `lineages` are the first-pass compartments used by skin.annotate.score_lineages
+# and skin.annotate.contamination_audit. `subtypes` are second-pass sets applied
+# after subclustering. `exclusive_pairs` drives the cross-lineage co-expression
+# test — a keratinocyte and a fibroblast should not both be detectable in the
+# same droplet at appreciable rates.
+#
+# Sources: Joost et al. Cell Syst 2016 / Cell Stem Cell 2020 (epidermis+HF),
+# Philippeos et al. JID 2018 & Buechler et al. Nature 2021 (fibroblast atlas),
+# Haensel et al. Cell Rep 2020 (wound), Guerrero-Juarez et al. Nat Commun 2019
+# (wound scRNA-seq), Davies/Jenkins Nat Immunol 2013 (macrophage origin),
+# Jaitin/Amit Cell 2019 & Hill Cell 2018 (LAM/Trem2), Ramachandran Nature 2019.
+
+organism: mouse
+
+lineages:
+  Keratinocytes:   [Krt5, Krt14, Krt1, Krt10, Krt15, Dsp, Pkp1, Perp, Lgals7, Col17a1, Trp63, Krtdap, Lor, Flg]
+  Sebaceous:       [Scd1, Elovl4, Elovl6, Dhcr24, Sdr16c6, Mgst1, Far2, Awat1, Krt79, Cidea]
+  Hair follicle:   [Lef1, Msx2, Dlx3, Krt25, Krt28, Krt71, Krt73, Tchh, Padi3, Foxn1, Hoxc13, Lhx2, Bnc2]
+  Endothelial:     [Pecam1, Egfl7, Cldn5, Cdh5, Flt1, Emcn, Kdr, Tie1]
+  Lymphatic endo:  [Prox1, Lyve1, Pdpn, Flt4, Ccl21a, Mmrn1]
+  Fibroblasts:     [Col1a1, Col1a2, Col3a1, Col5a1, Pdgfra, Dpt, Sparc, Dcn, Lum, Crabp1, Mfap5]
+  Fibro-activated: [Tnn, Lrrc15, Lox, Tnc, Thbs2, Postn]
+  Smooth muscle:   [Acta2, Myh11, Tagln, Myl9, Des, Rgs5, Pdgfrb, Notch3]
+  Skeletal muscle: [Ttn, Neb, Ryr1, Actn3, Tnnt3, Tnnc2, Atp2a1]
+  Adipocytes:      [Adipoq, Plin1, Lep, Cfd, Fabp4]
+  Melanocytes:     [Mlana, Pmel, Tyrp1, Dct, Mitf]
+  Schwann/neural:  [Mpz, Plp1, Sox10, Ncmap]
+  T cells:         [Cd3e, Cd3d, Cd3g, Cd8a, Trac, Lck, Thy1, Nkg7, Ccl5]
+  gdT / DETC:      [Trdc, Trgv4, Sox13, Il17a, Rorc, Il23r, Cd163l1]
+  ILC/NK:          [Ncr1, Klrd1, Klrb1c, Gata3, Rora, Il7r]
+  B cells:         [Cd79a, Ms4a1, Ighm, Jchain]
+  Mast cells:      [Cpa3, Cma1, Mcpt4, Kit, Ms4a2]
+  cDC:             [Cd74, H2-Aa, H2-Ab1, H2-Eb1, Flt3, Xcr1, Itgax, Ciita]
+  pDC:             [Siglech, Bst2, Ccr9, Irf8, Tcf4]
+  Langerhans:      [Cd207, Epcam, Cd74, Itgax]
+  Monocytes:       [Ly6c2, Ly6c1, Plac8, Ccr2, Vcan, F13a1, Chil3, Gngt2, Hp, Sell]
+  Macrophages:     [Lyz2, Ctss, Mrc1, Trem2, C1qa, C1qb, C1qc, Adgre1, Csf1r, Tgfbi, Mmp12, Arg1, Nos2, Stab1, Mertk, Apoe]
+  Neutrophils:     [S100a8, S100a9, Retnlg, Mpo, Mmp9, Csf3r, Cxcr2, Cxcl2, Il1b, Srgn, Trem1, Acod1]
+  Proliferating:   [Mki67, Top2a, Stmn1, Birc5, Cdk1, Ncapd2]
+  Erythrocytes:    [Hba-a1, Hba-a2, Hbb-bs, Hbb-bt, Alas2, Slc4a1]
+
+# Broad compartments, used for the coarse "does this label sit in the right
+# compartment" check and for reporting.
+compartments:
+  Immune:      [T cells, gdT / DETC, ILC/NK, B cells, Mast cells, cDC, pDC, Langerhans, Monocytes, Macrophages, Neutrophils]
+  Structural:  [Fibroblasts, Fibro-activated, Smooth muscle, Skeletal muscle, Adipocytes]
+  Epithelial:  [Keratinocytes, Sebaceous, Hair follicle]
+  Vascular:    [Endothelial, Lymphatic endo]
+  Neural:      [Melanocytes, Schwann/neural]
+  Other:       [Proliferating, Erythrocytes]
+
+# Pan-lineage gates. A cell claiming to be immune should carry Ptprc.
+gates:
+  immune: [Ptprc]
+  epithelial: [Epcam, Krt5, Krt14]
+  mesenchymal: [Col1a1, Pdgfra]
+  endothelial: [Pecam1, Cdh5]
+
+# Pairs that should be close to mutually exclusive in a droplet. Co-detection
+# above the object-wide baseline is the contamination signal.
+exclusive_pairs:
+  - [Keratinocytes, Fibroblasts]
+  - [Keratinocytes, Macrophages]
+  - [Keratinocytes, T cells]
+  - [Fibroblasts, Macrophages]
+  - [Fibroblasts, T cells]
+  - [Endothelial, Keratinocytes]
+  - [Macrophages, Neutrophils]
+  - [Melanocytes, Fibroblasts]
+  - [Smooth muscle, Macrophages]
+  - [Adipocytes, Keratinocytes]
+
+# Second-pass subtype sets, applied after skin.sub.pipeline.
+subtypes:
+  macrophage:
+    "Inf. Mono.":      [Ly6c2, Ly6c1, Plac8, Ccr2, Sell, Vcan, F13a1, Chil3, Hp, Gngt2]
+    "Early MDM":       [Ccr2, Ly6c2, Fn1, Ms4a7, Cd9, Itgax, Ifitm3]
+    "MΦ-Inf":          [Il1b, Tnf, Cxcl2, Ccl3, Ccl4, Nfkbia, Sod2, Ptgs2]
+    "MΦ-Act":          [Arg1, Nos2, Spp1, Mmp12, Mmp14, Fn1, Thbs1]
+    "MΦ-IFN/AS DCs":   [Isg15, Ifit1, Ifit3, Rsad2, Irf7, Stat1, Stat2, Cxcl9, Cxcl10]
+    "LAM-I":           [Trem2, Gpnmb, Cd9, Lpl, Fabp5, Ctsd]
+    "LAM-II":          [Trem2, Spp1, Gpnmb, Cd63, Atp6v0d2, Acp5, Ctsk]
+    "LAM":             [Trem2, Gpnmb, Cd9, Spp1, Lpl, Fabp5, Cd63]
+    "MΦ-Res/Rep":      [Mrc1, Cd163, Folr2, Lyve1, Timd4, Gas6, Selenop, Pf4, Maf, C1qa]
+  macrophage_origin:
+    "Inflammatory Monocytes": [Ly6c2, Ly6c1, Ccr2, Sell, Plac8, Chil3, F13a1, Vcan, Hp, Gngt2]
+    "MΦ-Recruited":           [Ccr2, Ly6c2, Arg1, Fn1, Spp1, Trem2, Gpnmb, Cd9, Ms4a7, Itgax]
+    "MΦ-Resident/Repair":     [Adgre1, Mertk, Timd4, Cd163, Mrc1, Folr2, Lyve1, Gas6, Selenop, C1qa, C1qb, C1qc, Pf4, Maf]
+  fibroblast:
+    "Papillary":   [Dkk2, Ptgds, Crabp1, Lef1, Trps1]
+    "Reticular":   [Dlk1, Mgp, Wisp2, Col11a1]
+    "Dermal papilla": [Sox2, Corin, Crabp1, Wif1, Bmp4]
+    "Myofibroblast": [Acta2, Tagln, Postn, Tnc, Lrrc15]
+    "Fascia/Adipo-fibro": [Cd34, Ly6a, Pi16, Dpp4]
+    "Inflammatory fibro": [Ccl2, Cxcl1, Il6, Ptgs2, Has1]
+  keratinocyte:
+    "Basal":       [Krt5, Krt14, Col17a1, Itga6, Trp63]
+    "Spinous":     [Krt1, Krt10, Dsc1, Dsg1a]
+    "Granular":    [Lor, Flg, Ivl, Sbsn, Krtdap, Cnfn]
+    "Proliferating basal": [Mki67, Top2a, Krt5, Krt14]
+    "HF/Isthmus":  [Krt79, Krt17, Sox9, Lgr5]
+    "Wound/EMT-like": [Krt6a, Krt6b, Krt16, Krt17, Sprr1a, S100a8]
+  tcell:
+    "CD4 Tconv":  [Cd4, Il7r, Cd40lg, Tcf7]
+    "Treg":       [Foxp3, Ctla4, Il2ra, Ikzf2]
+    "CD8 T":      [Cd8a, Cd8b1, Gzmk, Ccl5]
+    "Th17":       [Rorc, Il17a, Il23r, Ccr6]
+    "gdT17":      [Trdc, Sox13, Il17a, Rorc]
+    "DETC":       [Trdc, Trgv5, Cd163l1, Il2rb]
+    "NK":         [Ncr1, Klrb1c, Klrd1, Gzmb, Prf1]
+    "ILC2":       [Gata3, Il1rl1, Areg, Il5, Il13]
+
+# Cell-cycle gene sets (Tirosh et al. Science 2016, mouse-cased).
+cell_cycle:
+  s_genes: [Mcm5, Pcna, Tyms, Fen1, Mcm2, Mcm4, Rrm1, Ung, Gins2, Mcm6, Cdca7, Dtl,
+            Prim1, Uhrf1, Cenpu, Hells, Rfc2, Rpa2, Nasp, Rad51ap1, Gmnn, Wdr76,
+            Slbp, Ccne2, Ubr7, Pold3, Msh2, Atad2, Rad51, Rrm2, Cdc45, Cdc6,
+            Exo1, Tipin, Dscc1, Blm, Casp8ap2, Usp1, Clspn, Pola1, Chaf1b, Brip1, E2f8]
+  g2m_genes: [Hmgb2, Cdk1, Nusap1, Ublcp1, Birc5, Tpx2, Top2a, Ndc80, Cks2, Nuf2,
+              Cks1b, Mki67, Tmpo, Cenpf, Tacc3, Smc4, Ccnb2, Ckap2l, Ckap2, Aurkb,
+              Bub1, Kif11, Anp32e, Tubb4b, Gtse1, Kif20b, Hjurp, Cdca3, Cdc20,
+              Ttk, Cdc25c, Kif2c, Rangap1, Ncapd2, Dlgap5, Cdca2, Cdca8, Ect2,
+              Kif23, Hmmr, Aurka, Psrc1, Anln, Lbr, Ckap5, Cenpe, Ctcf, Nek2,
+              G2e3, Gas2l3, Cbx5, Cenpa]
+
+# Organism-aware QC prefixes.
+qc_patterns:
+  mito: '^mt-'
+  ribo: '^Rp[sl]'
+  hb:   '^Hb[ab]-'
+  # Skin-specific ambient probes: high keratin/collagen soup is the dominant
+  # failure mode in enzymatically dissociated skin.
+  ambient_keratin:  '^Krt\d'
+  ambient_collagen: '^Col\d+[a-z]{1,2}\d+$'
+  ambient_cornified: '^(Sbsn|Lor|Flg|Krtdap|Cnfn|Tchh)$'
+  neutrophil_probe: '^(S100a8|S100a9|Retnlg|Mmp9)$'

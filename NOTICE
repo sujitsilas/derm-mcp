@@ -1,0 +1,114 @@
+skin-mcp — third-party attributions and data provenance
+=======================================================
+
+py-monocle / principal graph  (src/skinmcp/vendor/py_monocle/)
+--------------------------------------------------------------
+The build spec asked for github.com/bioturing/py-monocle to be vendored at a
+pinned commit. That repository publishes NO LICENSE — GitHub reports
+`NOASSERTION` — so redistributing its source inside this package is not
+something we can do.
+
+What ships instead is an independent implementation of the same *published*
+algorithm, written from the primary sources:
+
+  * Mao, Wang, Yan & Zeng. "SimplePPT: A Simple Principal Tree Algorithm."
+    SIAM International Conference on Data Mining (SDM), 2015.
+    — the reverse-graph-embedding objective and its alternating optimisation.
+  * Cao, Spielmann, Qiu, ... Trapnell & Shendure. "The single-cell
+    transcriptional landscape of mammalian organogenesis." Nature 566, 2019
+    (monocle3). — k-means centroid initialisation, MST tree construction,
+    spur pruning, and geodesic pseudotime from a root principal point.
+
+It exposes the same `learn_graph` / `order_cells` surface. `skin.traj.monocle`
+prefers the real `py_monocle` package when the user has installed it and falls
+back to this implementation otherwise; the return field `implementation` records
+which one ran, and results are close but not bit-identical.
+
+
+Mouse–human ortholog table  (src/skinmcp/knowledge/orthologs_mm_hs.tsv)
+-----------------------------------------------------------------------
+Derived from the Mouse Genome Informatics (MGI) vertebrate homology report:
+  https://www.informatics.jax.org/downloads/reports/HOM_MouseHumanSequence.rpt
+Downloaded 2026-07-31. 24,590 mouse–human symbol pairs; 18,782 are 1:1.
+MGI data are freely available for research use; see
+http://www.informatics.jax.org/mgihome/other/copyright.shtml
+Regenerate with scripts/build_orthologs.py.
+
+
+Marker sets  (src/skinmcp/knowledge/markers_*.yaml)
+----------------------------------------------------
+Curated from published skin single-cell work. Primary sources cited inline in
+the YAML header; the main ones are:
+  Joost et al., Cell Systems 2016 and Cell Stem Cell 2020 (epidermis, HF)
+  Philippeos et al., J Invest Dermatol 2018 (dermal fibroblast subsets)
+  Buechler et al., Nature 2021 (pan-tissue fibroblast atlas)
+  Haensel et al., Cell Reports 2020 (wound)
+  Guerrero-Juarez et al., Nat Commun 2019 (wound scRNA-seq)
+  Davies, Jenkins, Allen & Taylor, Nat Immunol 2013 (macrophage origin)
+  Jaitin et al., Cell 2019; Hill et al., Cell 2018 (LAM/Trem2)
+  Ramachandran et al., Nature 2019 (scar-associated macrophages)
+  Tirosh et al., Science 2016 (cell-cycle gene sets)
+  Reynolds et al., Science 2021 (Human Skin Cell Atlas — referenced for the
+  CellTypist Adult_Human_Skin model, not redistributed here)
+
+
+Enrichment library names  (src/skinmcp/knowledge/enrich_libraries.yaml)
+-----------------------------------------------------------------------
+Verified against the live Enrichr catalogue (228 libraries) at
+https://maayanlab.cloud/Enrichr/datasetStatistics on 2026-07-31. No Enrichr
+gene-set content is redistributed; the file records library *names* and guidance
+only. Enrichr: Chen et al., BMC Bioinformatics 2013; Kuleshov et al., NAR 2016.
+
+
+GO term exclusion preset `skin_irrelevant_v1`
+----------------------------------------------
+Transcribed from the reference notebook supplied with the build spec
+(reference/macrophages_resident_recruited.ipynb, cell 10). It is a
+dataset-specific judgement call, ships OFF by default, and every term it drops
+is recorded in the tool return and in the figure's sidecar JSON.
+
+
+R runtime  (src/skinmcp/runtimes/r/)
+-------------------------------------
+The Dockerfile builds on rocker/r-ver (Rocker Project, GPL-2) and installs
+packages from CRAN and Bioconductor per renv.lock. No R package source is
+redistributed here; the lockfile pins versions and the image is built locally.
+CellChat is installed from github.com/jinworks/CellChat (GPL-3).
+
+
+Software this server calls
+---------------------------
+scanpy (Wolf, Angerer & Theis, Genome Biol 2018) · anndata · harmonypy
+(Korsunsky et al., Nat Methods 2019) · PyDESeq2 (Muzellec et al.,
+Bioinformatics 2023) / DESeq2 (Love, Huber & Anders, Genome Biol 2014) ·
+gseapy (Fang et al., Bioinformatics 2023) · decoupler (Badia-i-Mompel et al.,
+Bioinformatics Advances 2022) · leidenalg (Traag, Waltman & van Eck, Sci Rep
+2019) · UMAP (McInnes, Healy & Melville, 2018) · Scrublet (Wolock, Lopez &
+Klein, Cell Syst 2019) · scDblFinder (Germain et al., F1000Research 2021) ·
+Milo (Dann et al., Nat Biotechnol 2022) · LIANA (Dimitrov et al., Nat Commun
+2022) · CellChat (Jin et al., Nat Commun 2021) · CellTypist (Domínguez Conde
+et al., Science 2022) · CELLxGENE Census (CZI) · adjustText.
+
+Each is licensed by its own authors; this project does not redistribute them.
+
+
+skin-mcp itself
+---------------
+MIT License. Copyright (c) 2026.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

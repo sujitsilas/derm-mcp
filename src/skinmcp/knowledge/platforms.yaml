@@ -1,0 +1,98 @@
+# Per-chemistry QC presets.
+#
+# These are FLOORS and CEILINGS applied on top of the MAD-based recommendation,
+# not replacements for it. skin.qc.recommend_thresholds(method="mad") is the
+# default and the recommended answer; method="fixed" returns these verbatim;
+# method="both" intersects them.
+#
+# `max_pct_mt: null` means SKIP the mitochondrial filter and say so in the
+# return — it does not mean 0.
+
+mouse:
+  10x_3prime_v3:    {min_genes: 200, max_genes: 6000, min_counts: 500, max_counts: 60000, max_pct_mt: 10}
+  10x_3prime_v4:    {min_genes: 200, max_genes: 6000, min_counts: 500, max_counts: 60000, max_pct_mt: 10}
+  10x_5prime:       {min_genes: 200, max_genes: 6000, min_counts: 500, max_counts: 60000, max_pct_mt: 10}
+  10x_flex:         {min_genes: 200, max_genes: 8000, min_counts: 400, max_counts: 60000, max_pct_mt: null}
+  10x_flex_ffpe:    {min_genes: 150, max_genes: 8000, min_counts: 300, max_counts: 60000, max_pct_mt: null}
+  10x_multiome_gex: {min_genes: 200, max_genes: 6000, min_counts: 500, max_counts: 60000, max_pct_mt: 5}
+  snrna:            {min_genes: 200, max_genes: 6000, min_counts: 400, max_counts: 40000, max_pct_mt: 5}
+  parse_evercode:   {min_genes: 150, max_genes: 5000, min_counts: 300, max_counts: 30000, max_pct_mt: 10}
+  bd_rhapsody:      {min_genes: 150, max_genes: 5000, min_counts: 300, max_counts: 30000, max_pct_mt: 10}
+  other:            {min_genes: 200, max_genes: 6000, min_counts: 500, max_counts: 60000, max_pct_mt: 10}
+
+human:
+  10x_3prime_v3:    {min_genes: 200, max_genes: 7500, min_counts: 500, max_counts: 60000, max_pct_mt: 15}
+  10x_3prime_v4:    {min_genes: 200, max_genes: 7500, min_counts: 500, max_counts: 60000, max_pct_mt: 15}
+  10x_5prime:       {min_genes: 200, max_genes: 7500, min_counts: 500, max_counts: 60000, max_pct_mt: 15}
+  10x_flex:         {min_genes: 200, max_genes: 9000, min_counts: 400, max_counts: 60000, max_pct_mt: null}
+  10x_flex_ffpe:    {min_genes: 150, max_genes: 9000, min_counts: 300, max_counts: 60000, max_pct_mt: null}
+  10x_multiome_gex: {min_genes: 200, max_genes: 7500, min_counts: 500, max_counts: 60000, max_pct_mt: 10}
+  snrna:            {min_genes: 200, max_genes: 7000, min_counts: 400, max_counts: 40000, max_pct_mt: 5}
+  parse_evercode:   {min_genes: 150, max_genes: 6000, min_counts: 300, max_counts: 30000, max_pct_mt: 15}
+  bd_rhapsody:      {min_genes: 150, max_genes: 6000, min_counts: 300, max_counts: 30000, max_pct_mt: 15}
+  other:            {min_genes: 200, max_genes: 7500, min_counts: 500, max_counts: 60000, max_pct_mt: 15}
+
+# Rules the code encodes explicitly (see qc_tools.platform_rules()).
+rules:
+  10x_flex:
+    probe_based: true
+    mito_is_viability_metric: false
+    note: >-
+      Fixed RNA Profiling is probe-based. The probe set covers few or no
+      mitochondrial genes, so pct_counts_mt is not a viability metric here; the
+      filter is skipped and a probe-set-aware complexity filter plus the
+      ambient-keratin flag are used instead.
+  10x_flex_ffpe:
+    probe_based: true
+    mito_is_viability_metric: false
+    higher_ambient: true
+    doublet_calls_unreliable: true
+    note: >-
+      FFPE has higher ambient and shorter effective libraries. The gene floor is
+      lowered, ambient decontamination is weighted more heavily, and doublet
+      callers are flagged as less reliable.
+  snrna:
+    nuclear: true
+    mito_is_viability_metric: false
+    note: >-
+      In snRNA-seq the mitochondrial fraction should be near zero. A high value
+      means cytoplasmic carryover, so the filter is diagnostic of prep quality
+      rather than of cell viability — the interpretation differs from scRNA.
+  10x_multiome_gex:
+    nuclear: true
+    mito_is_viability_metric: false
+    note: The GEX arm of Multiome is nuclear; treat mito as in snRNA-seq.
+
+# 10x multiplet rate vs cells recovered (Chromium Single Cell 3' user guide).
+# Used for expected-vs-observed doublet-rate flagging.
+multiplet_table:
+  - {cells_recovered: 500,   rate: 0.004}
+  - {cells_recovered: 1000,  rate: 0.008}
+  - {cells_recovered: 2000,  rate: 0.016}
+  - {cells_recovered: 3000,  rate: 0.023}
+  - {cells_recovered: 4000,  rate: 0.031}
+  - {cells_recovered: 5000,  rate: 0.039}
+  - {cells_recovered: 6000,  rate: 0.046}
+  - {cells_recovered: 7000,  rate: 0.054}
+  - {cells_recovered: 8000,  rate: 0.061}
+  - {cells_recovered: 9000,  rate: 0.069}
+  - {cells_recovered: 10000, rate: 0.076}
+  - {cells_recovered: 15000, rate: 0.115}
+  - {cells_recovered: 20000, rate: 0.152}
+
+# Flag thresholds for skin.qc.sample_stats.
+flags:
+  low_cell_count:          {threshold: 500,  severity: warn}
+  very_low_cell_count:     {threshold: 200,  severity: exclude_candidate}
+  low_median_genes:        {threshold: 500,  severity: warn}
+  high_mito_mouse:         {threshold: 15.0, severity: warn}
+  high_mito_human:         {threshold: 20.0, severity: warn}
+  high_ambient_keratin:    {threshold: 0.15, severity: warn}
+  high_ambient_collagen:   {threshold: 0.10, severity: warn}
+  high_hemoglobin:         {threshold: 0.05, severity: warn}
+  low_complexity:          {threshold: 0.80, severity: warn}
+  outlier_vs_cohort_mads:  {threshold: 3.0,  severity: warn}
+  saturating_doublet_rate: {threshold: 0.10, severity: warn}
+  # Below this many genes a proposed min_genes floor starts deleting real
+  # neutrophils, which legitimately carry 200-600 genes in wound/burn skin.
+  neutrophil_risk_min_genes: {threshold: 250, severity: warn}

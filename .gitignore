@@ -1,0 +1,120 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+.eggs/
+pip-wheel-metadata/
+
+# Test / lint / type caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# NOTE: uv.lock IS committed on purpose — the spec requires pinned, reproducible
+# Python versions, and skin.runtime.manifest reports them in the methods section.
+
+# ─── Editor / OS ──────────────────────────────────────────────────────────────
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude Code local overrides (settings.json itself is shareable; .local is not)
+.claude/settings.local.json
+
+# ─── Secrets ──────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# ─── skin-mcp project outputs ─────────────────────────────────────────────────
+# Projects normally live under --project-root (default ~/.skinmcp), outside the
+# repo. These patterns catch a stray run started with `--project-root .`.
+#
+# All anchored with a leading slash: `src/skinmcp/runtimes/` and
+# `src/skinmcp/prompts/` are SOURCE and must stay committed. An unanchored
+# `runtimes/` would silently delete the R Dockerfile, renv.lock and every vetted
+# script from the repo.
+/projects/
+/objects/
+/figures/
+/tables/
+/notebooks/
+/returns/
+/logs/
+/models/
+proj_*/
+
+# ─── Data ─────────────────────────────────────────────────────────────────────
+# Including tests/golden/golden_mouse_skin.h5ad: 12.5 MB, and deterministically
+# regenerable with `python tests/golden/make_golden.py` (seed=0). conftest.py
+# rebuilds it automatically if it is missing, so CI and a fresh clone both work.
+*.h5ad
+*.h5
+*.loom
+*.mtx
+*.rds
+*.zarr/
+*.pkl
+*.pickle
+
+# SQLite project memory, including the WAL sidecars that WAL mode creates
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Exported artifacts
+*_bundle.zip
+methods_draft.md
+memory_export.md
+memory_export.json
+/report.md
+/report.html
+
+# ─── R runtime ────────────────────────────────────────────────────────────────
+# renv.lock and the Dockerfile ARE committed; the restored library is not.
+renv/library/
+renv/local/
+renv/staging/
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# ─── Reference material ───────────────────────────────────────────────────────
+# 234 MB of embedded notebook outputs. Keep it local; the extracted patterns it
+# contributed are documented in NOTICE and reproduced in style/panels.py.
+reference/macrophages_resident_recruited.ipynb
+
+# ─── Jupyter ──────────────────────────────────────────────────────────────────
+# Opening the reference notebook or an exported analysis.ipynb creates these.
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# ─── Scratch ──────────────────────────────────────────────────────────────────
+*.log
+scratch/
+tmp/
+.tmp/

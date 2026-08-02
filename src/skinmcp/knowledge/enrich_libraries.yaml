@@ -1,0 +1,117 @@
+# Curated enrichment-library recommendations, surfaced by
+# skin.enrich.list_libraries(question_type, organism).
+#
+# Library names were verified against the live Enrichr catalogue
+# (https://maayanlab.cloud/Enrichr/datasetStatistics, 228 libraries, 2026-07-31).
+# Anything not in that catalogue is marked `source: msigdb` and is fetched
+# through gseapy.Msigdb() instead.
+
+caveats:
+  enrichr_mouse: >-
+    Enrichr maps mouse symbols onto human orthologs internally. For most GO
+    questions that is fine. Where it matters — Hallmark scoring in particular —
+    use the mouse-native GMT via
+    gseapy.Msigdb().get_gmt(category="mh.all", dbver="2024.1.Mm")
+    rather than passing organism="Mouse" to enrichr.
+  ora_vs_gsea: >-
+    ORA throws away the ranking and depends on an arbitrary FDR/LFC cutoff.
+    When the DE has adequate power, prefer skin.enrich.gsea (gseapy.prerank) on
+    the full ranked list.
+  background: >-
+    Fold enrichment is (k/N) / (n/M_BG). M_BG defaults to 15000 and materially
+    changes the number. Report it alongside the value; it is not a constant of
+    nature.
+
+question_types:
+  broad_biology:
+    recommended: [GO_Biological_Process_2025]
+    alternatives: [GO_Biological_Process_2023, GO_Molecular_Function_2025, GO_Cellular_Component_2025]
+    why: Default. Verbose and redundant, but interpretable and what reviewers expect.
+  coherent_programs:
+    recommended: [MSigDB_Hallmark_2020]
+    mouse_native: {source: msigdb, category: mh.all, dbver: "2024.1.Mm"}
+    why: 50 non-redundant programs. Best for per-cell scoring and state-space plots.
+  signaling:
+    recommended: [Reactome_Pathways_2024, KEGG_2019_Mouse, KEGG_2021_Human, WikiPathways_2024_Mouse, WikiPathways_2024_Human]
+    why: Curated pathway topology. Pick the organism-matched KEGG/WikiPathways variant.
+  immune_specific:
+    recommended: [Tabula_Muris, Mouse_Gene_Atlas, Human_Gene_Atlas]
+    msigdb_only: {source: msigdb, category: c7.immunesigdb, dbver: "2024.1.Hs"}
+    why: >-
+      ImmuneSigDB is NOT in the Enrichr catalogue under any name; fetch it from
+      MSigDB via gseapy.Msigdb. The Enrichr entries listed here are tissue/cell
+      expression atlases, which answer a different question — use them for
+      identity, not for immune activation state.
+  tf_activity:
+    recommended: [TRRUST_Transcription_Factors_2019, ChEA_2022, ENCODE_and_ChEA_Consensus_TFs_from_ChIP-X]
+    prefer: decoupler + CollecTRI
+    why: >-
+      ORA over TF-target sets is a weak proxy for TF activity. Prefer
+      skin.enrich.tf_activity (decoupler ULM over CollecTRI), which uses the
+      signed effect sizes rather than a thresholded gene list.
+  metabolism:
+    recommended: [MSigDB_Hallmark_2020, KEGG_2019_Mouse, KEGG_2021_Human]
+    hallmark_subset: [HALLMARK_GLYCOLYSIS, HALLMARK_OXIDATIVE_PHOSPHORYLATION,
+                      HALLMARK_FATTY_ACID_METABOLISM, HALLMARK_HYPOXIA,
+                      HALLMARK_CHOLESTEROL_HOMEOSTASIS, HALLMARK_MTORC1_SIGNALING]
+    why: Hallmark's metabolic programs are cleaner than KEGG's overlapping maps.
+  cell_identity:
+    recommended: [CellMarker_2024, PanglaoDB_Augmented_2021, Azimuth_2023, Azimuth_Cell_Types_2021]
+    why: For sanity-checking a proposed label. Not a substitute for canonical markers.
+  disease:
+    recommended: [DisGeNET, GWAS_Catalog_2023, Rare_Diseases_GeneRIF_Gene_Lists]
+    why: Rarely the right question for a mouse wound dataset. Included for completeness.
+
+# The reference notebook's 28-term exclusion list, shipped as an OPT-IN preset.
+#
+# It is off by default and it must stay that way. Some entries are defensible in
+# a skin dataset (neuronal, cartilage, embryonic skeleton). Others are not:
+# "Epithelial To Mesenchymal Transition" and "Mesenchymal Cell Differentiation"
+# are plausibly real biology in wound fibroblasts, and silently deleting them
+# would propagate one project's judgement call to every user of this server.
+#
+# Whenever an exclusion preset is used, skin.enrich.ora records exactly which
+# terms were dropped, and the figure's sidecar JSON carries the preset name.
+exclude_presets:
+  skin_irrelevant_v1:
+    description: >-
+      Terms the reference burn/sham macrophage analysis filtered out of GO
+      results. Dataset-specific. Review before applying; the EMT and mesenchymal
+      entries in particular may be real in wound fibroblasts.
+    provenance: reference/macrophages_resident_recruited.ipynb cell 10
+    terms:
+      - Negative Regulation Of Neuroinflammatory Response
+      - Negative Regulation Of Cartilage Development
+      - Regulation Of Neuroinflammatory Response
+      - Myotube Cell Development
+      - Response To Amyloid-Beta
+      - Axon Guidance
+      - Negative Regulation Of Axon Extension
+      - Neuron Projection Guidance
+      - Negative Regulation Of Chemotaxis
+      - Positive Regulation Of Actin Filament Bundle Assembly
+      - Positive Regulation of Amyloid-Beta Clearance
+      - "RNA Splicing, Via Transesterification Reactions With Bulged Adenosine As Nucleophile"
+      - Proteasome-Mediated Ubiquitin-Dependent Protein Catabolic Process
+      - Epithelial To Mesenchymal Transition
+      - Positive Regulation Of Protein-Containing Complex Assembly
+      - Embryonic Skeletal System Morphogenesis
+      - Embryonic Organ Morphogenesis
+      - Skeletal System Morphogenesis
+      - Mesenchymal Cell Differentiation
+      - Negative Regulation Of Chondrocyte Differentiation
+      - Embryonic Cranial Skeleton Differentiation
+      - Embryonic Cranial Morphogenesis
+      - Thymus Development
+      - Embryonic Cranial Skeleton Morphogenesis
+      - Primary Alcohol Metabolic Process
+      - Pharyngeal System Development
+      - Positive Regulation Of Muscle Hypertrophy
+  housekeeping_v1:
+    description: Generic translation/ribosome terms that dominate any DE list.
+    terms:
+      - Cytoplasmic Translation
+      - Ribosome Assembly
+      - rRNA Processing
+      - Peptide Biosynthetic Process
+      - Translational Initiation
