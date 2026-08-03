@@ -66,8 +66,9 @@ Verify:
 # desktop / local clients
 skin-mcp --transport stdio
 
-# lab-shared instance
-skin-mcp --transport http --host 0.0.0.0 --port 8931 --project-root /data/skinmcp
+# lab-shared instance (use a path that exists and is writable — on macOS the
+# root volume is read-only, so /data/... will fail with Errno 30)
+skin-mcp --transport http --host 0.0.0.0 --port 8931 --project-root ~/skinmcp-projects
 
 # a 30B local model does better with fewer schemas in context
 skin-mcp --transport stdio --profile core
@@ -112,6 +113,13 @@ skin-mcp --transport stdio --offline
 }
 ```
 
+If you use LM Studio's **GUI** instead of the JSON file, note that each
+"Argument" box is one argv token, not a shell string. `--profile core` typed into
+a single box arrives as the literal one-word option `"--profile core"`, argparse
+rejects it, the process exits, and you get `MCP error -32000: Connection closed`.
+Use four boxes — `--transport`, `stdio`, `--profile`, `core` — or just leave
+Arguments empty, since stdio is already the default.
+
 **Ollama / any HTTP client** — start with `--transport http` and point the client at
 `http://127.0.0.1:8931/mcp`.
 
@@ -119,6 +127,26 @@ skin-mcp --transport stdio --offline
 
 > `--profile core` is recommended for models under ~70B. Tool schemas are context you
 > spend before the model has seen your data.
+
+### Troubleshooting `MCP error -32000: Connection closed`
+
+That message means the server process exited before completing the handshake. It is
+almost never a protocol problem — run the exact command your client is running, in a
+terminal, and read the error:
+
+```bash
+/path/to/derm-mcp/.venv/bin/skin-mcp --transport stdio < /dev/null
+```
+
+The two usual causes:
+
+| symptom in that output | cause | fix |
+|---|---|---|
+| `usage: skin-mcp [-h] ...` | an argument arrived as one token (`"--transport stdio"`) | one argv token per argument box |
+| `OSError: [Errno 30] Read-only file system` | `--project-root` points somewhere unwritable, e.g. `/data/...` on macOS | use `~/.skinmcp` (the default) or any path under your home |
+
+A bare invocation with no arguments is the most reliable starting point: stdio is the
+default transport and `~/.skinmcp` is created automatically.
 
 ---
 
