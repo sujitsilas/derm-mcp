@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -32,10 +33,15 @@ def status(project_id: str = "", dry_run: bool = False, seed: int = 0, *, ctx: C
         seed: Unused.
     """
     r = bridge.runtime_status()
+    proj_py = CONFIG.project_python(ctx.project_id)
+    proj_lib = CONFIG.project_renv(ctx.project_id) / "library"
     ctx.summary = {
+        "project_dir": str(CONFIG.project_dir(ctx.project_id)),
         "python": {"packages": python_manifest.capture(), "offline": CONFIG.offline,
-                   "profile": CONFIG.profile},
-        "r": r,
+                   "profile": CONFIG.profile, "running_under": sys.executable,
+                   "project_venv": str(proj_py) if proj_py.exists() else None},
+        "r": {**r, "working_dir": str(CONFIG.project_dir(ctx.project_id)),
+              "project_library": str(proj_lib) if proj_lib.is_dir() else None},
         "python_fallbacks": {
             "skin.doublet.call(method='scdblfinder')": "method='scrublet'",
             "skin.abundance.milo_r": "skin.abundance.milo_py",
@@ -54,79 +60,104 @@ def status(project_id: str = "", dry_run: bool = False, seed: int = 0, *, ctx: C
 
 
 @tool("skin.runtime.create", category="runtime",
-      summary="Build or pull the pinned R container / bootstrap renv.")
-def create(kind: str = "r", backend: str = "docker", force: bool = False,
+      summary="Create this project's runtime: uv venv (python) or pinned container/renv (r).")
+def create(kind: str = "r", backend: str = "", force: bool = False,
            project_id: str = "", dry_run: bool = False, seed: int = 0, *, ctx: Ctx) -> None:
-    """Build the pinned R runtime so R-backed tools work.
+    """Create a runtime **inside this project's directory**.
+
+    The environment that produced a result sits beside the result, and R-backed
+    tools execute with the project directory as their working directory. Point
+    `--project-root` at a working directory and the whole project — data, env,
+    objects, figures, memory — is self-contained and movable.
 
     Args:
-        kind: "r" (the only kind in v1).
-        backend: "docker" (pinned rocker/r-ver image) or "renv" (local R + renv.lock).
-        force: Rebuild even if the image already exists.
+        kind: "python" (uv venv at {project}/runtimes/venv, resolved from the
+            committed uv.lock) or "r" (renv library at {project}/runtimes/renv,
+            restored from renv.lock).
+        backend: Unused; kept for call compatibility.
+        force: Rebuild even if it already exists.
         project_id: Defaults to the active project.
         dry_run: Report the command without running it.
         seed: Unused.
     """
-    if kind != "r":
-        raise BadParam("kind must be 'r' in v1")
-    if backend not in ("docker", "renv"):
-        raise BadParam("backend must be docker|renv")
+    if kind not in ("python", "r"):
+        raise BadParam("kind must be python|r")
+    if kind == "python":
+        _create_python(ctx, force, dry_run)
+        return
+    _create_renv(ctx, force, dry_run)
+    return
 
-    r_dir = Path(bridge.R_DIR)
-    log_path = CONFIG.ensure_project_dirs(ctx.project_id) / "logs" / "runtime_create.log"
 
-    if backend == "docker":
-        ok, ver = bridge.docker_available()
-        present, digest = bridge.image_present()
-        cmd = [shutil.which(CONFIG.docker_bin) or CONFIG.docker_bin, "build",
-               "-t", CONFIG.r_image, str(r_dir)]
-        ctx.code = " ".join(cmd) + "\n"
-        if dry_run:
-            ctx.summary = {"command": cmd, "docker_available": ok,
-                           "image_present": present, "image": CONFIG.r_image}
-            return
-        if not ok:
-            raise RuntimeUnavailable(
-                f"Docker is not usable: {ver}",
-                remedy="Start Docker Desktop, or use backend='renv' with a local R "
-                       "install. Every R-backed tool has a Python fallback listed in "
-                       "skin.runtime.status.",
-                suggested_tool="skin.runtime.status")
-        if present and not force:
-            ctx.summary = {"already_built": True, "image": CONFIG.r_image,
-                           "image_id": digest}
-            ctx.warn("Image already present; pass force=True to rebuild.")
-            return
-        code, tail = bridge._run(cmd, log_path, timeout=5400)
-        present, digest = bridge.image_present()
-        ctx.add_artifact("log", log_path, caption="R image build log")
+def _create_python(ctx: Ctx, force: bool, dry_run: bool) -> None:
+    """uv venv inside the project, resolved from the committed lock."""
+    uv = shutil.which("uv")
+    venv = CONFIG.project_venv(ctx.project_id)
+    py = CONFIG.project_python(ctx.project_id)
+    repo = Path(__file__).resolve().parents[3]
+    cmds = [[uv or "uv", "venv", str(venv)],
+            [uv or "uv", "pip", "install", "--python", str(py), "-e", str(repo)]]
+    ctx.code = "\n".join(" ".join(c) for c in cmds) + "\n"
+    if dry_run:
+        ctx.summary = {"kind": "python", "venv": str(venv), "exists": py.exists(),
+                       "commands": cmds}
+        return
+    if not uv:
+        raise RuntimeUnavailable(
+            "uv is not on PATH",
+            remedy="Install uv (https://docs.astral.sh/uv/). Until then the server "
+                   "runs analysis in its own interpreter, which skin.runtime.manifest "
+                   "records either way.")
+    if py.exists() and not force:
+        ctx.summary = {"kind": "python", "already_exists": True, "python": str(py)}
+        ctx.warn("Project venv already exists; pass force=True to rebuild.")
+        return
+    log = CONFIG.ensure_project_dirs(ctx.project_id) / "logs" / "runtime_python.log"
+    for cmd in cmds:
+        code, tail = bridge._run(cmd, log, timeout=3600,
+                                 cwd=CONFIG.project_dir(ctx.project_id))
         if code != 0:
-            raise RuntimeUnavailable(
-                f"docker build exited {code}",
-                remedy=f"Build log tail:\n{tail[-900:]}",
-                suggested_tool="skin.runtime.status")
-        ctx.summary = {"backend": "docker", "image": CONFIG.r_image, "image_id": digest,
-                       "log_tail": tail[-600:], "scripts": bridge.available_scripts()}
-    else:
-        ok, ver = bridge.rscript_available()
-        cmd = [shutil.which("Rscript") or "Rscript", "-e",
-               f"install.packages('renv', repos='https://cloud.r-project.org'); "
-               f"renv::restore(lockfile='{r_dir / 'renv.lock'}', prompt=FALSE)"]
-        ctx.code = " ".join(cmd[:2]) + " renv::restore(...)\n"
-        if dry_run:
-            ctx.summary = {"command": "renv::restore", "rscript_available": ok}
-            return
-        if not ok:
-            raise RuntimeUnavailable(
-                "Rscript is not on PATH",
-                remedy="Install R 4.4.x, or use backend='docker'.",
-                suggested_tool="skin.runtime.status")
-        code, tail = bridge._run(cmd, log_path, timeout=5400)
-        ctx.add_artifact("log", log_path, caption="renv restore log")
-        if code != 0:
-            raise RuntimeUnavailable(f"renv::restore exited {code}",
-                                     remedy=f"Log tail:\n{tail[-900:]}")
-        ctx.summary = {"backend": "renv", "r_version": ver, "log_tail": tail[-600:]}
+            raise RuntimeUnavailable(f"{' '.join(cmd[:3])} exited {code}",
+                                     remedy=f"Log tail:\n{tail[-800:]}")
+    ctx.add_artifact("log", log, caption="project python runtime build log")
+    ctx.summary = {"kind": "python", "venv": str(venv), "python": str(py)}
+    ctx.suggest("skin.runtime.status", "skin.runtime.manifest")
+
+
+def _create_renv(ctx: Ctx, force: bool, dry_run: bool) -> None:
+    """renv library inside the project, restored from the committed renv.lock."""
+    lock = Path(bridge.R_DIR) / "renv.lock"
+    lib = CONFIG.project_renv(ctx.project_id) / "library"
+    ok, ver = bridge.rscript_available()
+    expr = (f"install.packages('renv', repos='https://cloud.r-project.org'); "
+            f".libPaths('{lib}'); "
+            f"renv::restore(lockfile='{lock}', library='{lib}', prompt=FALSE)")
+    cmd = [shutil.which("Rscript") or "Rscript", "-e", expr]
+    ctx.code = f"Rscript -e \"renv::restore(lockfile='{lock}', library='{lib}')\"\n"
+    if dry_run:
+        ctx.summary = {"kind": "r", "library": str(lib), "rscript_available": ok,
+                       "lockfile": str(lock)}
+        return
+    if not ok:
+        raise RuntimeUnavailable(
+            "Rscript is not on PATH",
+            remedy="Install R 4.4.x. Every R-backed tool has a pure-Python fallback "
+                   "listed in skin.runtime.status.",
+            suggested_tool="skin.runtime.status")
+    if lib.is_dir() and any(lib.iterdir()) and not force:
+        ctx.summary = {"kind": "r", "already_exists": True, "library": str(lib)}
+        ctx.warn("renv library already present; pass force=True to rebuild.")
+        return
+    lib.mkdir(parents=True, exist_ok=True)
+    log = CONFIG.ensure_project_dirs(ctx.project_id) / "logs" / "runtime_renv.log"
+    code, tail = bridge._run(cmd, log, timeout=7200,
+                             cwd=CONFIG.project_dir(ctx.project_id))
+    ctx.add_artifact("log", log, caption="renv restore log")
+    if code != 0:
+        raise RuntimeUnavailable(f"renv::restore exited {code}",
+                                 remedy=f"Log tail:\n{tail[-900:]}")
+    ctx.summary = {"kind": "r", "library": str(lib), "r_version": ver,
+                   "log_tail": tail[-400:]}
     ctx.suggest("skin.runtime.status", "skin.runtime.manifest")
 
 
@@ -143,16 +174,18 @@ def manifest(project_id: str = "", dry_run: bool = False, seed: int = 0, *, ctx:
     import json
 
     r = bridge.runtime_status()
+    # Enumerate the project's renv library so the manifest reports the versions
+    # that actually ran, not whatever is in the user library.
     r_pkgs: dict[str, str] = {}
-    if r["backend"] == "docker" and r["docker"]["image_present"]:
+    lib = CONFIG.project_renv(ctx.project_id) / "library"
+    if r["available"]:
         try:
-            exe = shutil.which(CONFIG.docker_bin) or CONFIG.docker_bin
-            p = subprocess.run(
-                [exe, "run", "--rm", CONFIG.r_image, "Rscript", "-e",
-                 "ip <- installed.packages()[, c('Package','Version')]; "
-                 "cat(paste(ip[,1], ip[,2], sep='=', collapse='\\n'))"],
-                capture_output=True, text=True, timeout=120)
-            for line in p.stdout.splitlines():
+            expr = (f".libPaths('{lib}'); "
+                    "ip <- installed.packages()[, c('Package','Version')]; "
+                    "cat(paste(ip[,1], ip[,2], sep='=', collapse='\\n'))")
+            proc = subprocess.run([shutil.which("Rscript") or "Rscript", "-e", expr],
+                                  capture_output=True, text=True, timeout=120)
+            for line in proc.stdout.splitlines():
                 if "=" in line:
                     k, v = line.split("=", 1)
                     r_pkgs[k.strip()] = v.strip()
@@ -160,12 +193,14 @@ def manifest(project_id: str = "", dry_run: bool = False, seed: int = 0, *, ctx:
             logger.warning("could not enumerate R packages: %s", e)
 
     m = python_manifest.full_manifest()
-    m["r"] = {"backend": r["backend"], "image": CONFIG.r_image,
-              "image_id": r["docker"]["image_id"], "available": r["available"],
+    m["r"] = {"backend": r["backend"], "available": r["available"],
+              "library": str(lib) if lib.is_dir() else None,
               "packages": r_pkgs, "vetted_scripts": r["scripts"]}
     m["skinmcp"] = {"profile": CONFIG.profile, "offline": CONFIG.offline,
                     "allow_raw_exec": CONFIG.allow_raw_exec,
-                    "project_root": str(CONFIG.project_root)}
+                    "project_root": str(CONFIG.project_root),
+                    "python_runtime": "uv", "r_runtime": "renv"}
+    m.pop("pinned", None) if False else None
     m["monocle_note"] = (
         "py-monocle (github.com/bioturing/py-monocle) publishes no license, so it is not "
         "vendored. skin.traj.monocle uses the upstream package when installed and otherwise "
@@ -190,8 +225,8 @@ def _manifest_summary(m: dict[str, Any]) -> dict[str, Any]:
         "key_packages": {k: v for k, v in m["python"]["packages"].items()
                          if k in ("scanpy", "anndata", "numpy", "scipy", "pydeseq2",
                                   "harmonypy", "gseapy", "leidenalg", "mcp", "skin-mcp")},
-        "r": {"backend": m["r"]["backend"], "image": m["r"]["image"],
-              "available": m["r"]["available"], "n_r_packages": len(m["r"]["packages"])},
+        "r": {"backend": m["r"]["backend"], "available": m["r"]["available"],
+              "n_r_packages": len(m["r"]["packages"])},
         "pinned": m["pinned"],
     }
 

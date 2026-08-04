@@ -121,8 +121,8 @@ def _header_md(project_id: str) -> str:
            if proj.get("design_notes") else "")
         + f"## Session info\n\n| package | version |\n|---|---|\n"
           f"| python | {m['python']['version']} |\n{ver}\n\n"
-          f"R runtime: `{r['backend']}` (image `{CONFIG.r_image}`, "
-          f"available={r['available']}).\n\n"
+          f"R runtime: `{r['backend']}` (available={r['available']}); "
+          f"Python: uv.\n\n"
           f"Pins: {m['pinned']}\n"
     )
 

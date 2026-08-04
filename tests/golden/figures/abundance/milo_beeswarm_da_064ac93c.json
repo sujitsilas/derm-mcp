@@ -1,0 +1,11 @@
+{
+  "artifact_id": "art_60c2fa4c",
+  "tool": "skin.abundance.milo_py",
+  "project_id": "proj_04c932d5",
+  "dataset_id": "ds_9522510e",
+  "caption": "Milo beeswarm Burn vs Sham (FDR<0.1)",
+  "params": {
+    "run_id": "da_064ac93c"
+  },
+  "created_at": "2026-08-04T00:08:43+00:00"
+}

@@ -1,0 +1,12 @@
+{
+  "artifact_id": "art_b93ea31a",
+  "tool": "skin.traj.monocle",
+  "project_id": "proj_37e6cb76",
+  "dataset_id": null,
+  "caption": "principal-graph trajectory rooted on Macrophages",
+  "params": {
+    "basis": "X_umap",
+    "cluster_key": "cell_types"
+  },
+  "created_at": "2026-08-04T06:14:33+00:00"
+}

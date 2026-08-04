@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 _LOCK = threading.RLock()
 _CACHE: OrderedDict[str, AnnData] = OrderedDict()
 
+#: Sanitisation notes from the most recent `mint` on *this* thread, waiting to be
+#: collected by the caller. Thread-local and consumed once: the MCP SDK runs every
+#: sync tool in a worker thread, so a module-level attribute here would let one
+#: tool call read another's notes, and a tool that never minted would re-report
+#: whatever the previous one left behind.
+_TLS = threading.local()
+
+
+def take_mint_notes() -> list[str]:
+    """Return and clear the notes left by this thread's last `mint`."""
+    notes = getattr(_TLS, "mint_notes", None) or []
+    _TLS.mint_notes = []
+    return list(notes)
+
 #: How X is currently scaled. Stored explicitly in ``uns["skinmcp"]["x_state"]``
 #: and never re-detected, because the `X.max() > 50` heuristic silently
 #: misclassifies small or heavily filtered objects.
@@ -171,19 +185,92 @@ def exists(project_id: str, dataset_id: str) -> bool:
         object_path(project_id, dataset_id).exists()
 
 
+#: Extensions that mean "this is a file the user wants loaded", mapped to the
+#: tool that loads them.
+_LOADERS = {".h5ad": "skin.io.load_h5ad", ".rds": "skin.io.load_seurat_rds",
+            ".loom": "skin.io.load_h5ad", ".h5": "skin.io.load_10x",
+            ".mtx": "skin.io.load_10x"}
+
+
+def find_by_op(project_id: str, op: str, params_match: dict[str, Any] | None = None,
+               ) -> list[str]:
+    """Handles produced by `op`, newest last, optionally filtered on params.
+
+    Lets a tool that needs derived state (a marker table, a DE result) point at
+    the handle that actually carries it. Tools mint a NEW handle, so a caller
+    that keeps using the pre-tool handle gets "not found" and is told to re-run
+    work it already did — the lineage forked and nothing said so.
+    """
+    out = []
+    for d in store.list_datasets(project_id):
+        if d.get("op") != op:
+            continue
+        if params_match:
+            try:
+                params = json.loads(d.get("params_json") or "{}")
+            except ValueError:
+                continue
+            if any(str(params.get(k)) != str(v) for k, v in params_match.items()):
+                continue
+        out.append(d["dataset_id"])
+    return out
+
+
+def bad_handle(project_id: str, ref: str) -> InvalidHandle:
+    """The error to raise when a dataset ref does not resolve.
+
+    Passing a FILE PATH where a handle belongs is the single most common model
+    mistake, and a bare "unknown handle" tells it nothing — it retries the same
+    call, or invents a handle. Every resolution site should raise this so the
+    reply always names the tool that actually fixes it.
+    """
+    known = [d["dataset_id"] for d in store.list_datasets(project_id)][-10:]
+    suffix = Path(ref).suffix.lower()
+    if suffix in _LOADERS or "/" in ref or "\\" in ref:
+        loader = _LOADERS.get(suffix, "skin.io.load_h5ad")
+        # Say whether the file is actually there. Without this the message reads
+        # as "wrong path" and the caller hunts for a better one: one real session
+        # cycled three candidate paths through skin.io.set_label seventeen times
+        # in a row, starting with the correct one, because nothing told it the
+        # path was fine and the *tool* was wrong.
+        exists = False
+        try:
+            exists = Path(ref).expanduser().is_file()
+        except OSError:
+            pass
+        if exists:
+            msg = (f"THE FILE EXISTS at {ref} — the path is correct. What is wrong "
+                   f"is the tool: this argument takes a dataset handle, not a path.")
+            remedy = (f"Call {loader}(path={ref!r}, organism=...) NOW. Do not try other "
+                      f"paths; this one is right. That call returns a `dataset_id` like "
+                      f"'ds_1a2b3c4d', which is what this argument wants.")
+        else:
+            msg = f"{ref!r} is a file path, not a dataset handle (and no file is there)"
+            remedy = (f"Check the path exists, then call {loader}(path=..., organism=...). "
+                      f"It returns a `dataset_id` like 'ds_1a2b3c4d', and every later tool "
+                      f"takes THAT, never the path.")
+        return InvalidHandle(
+            msg, remedy=remedy, suggested_tool=loader,
+            details={"given": ref, "file_exists": exists, "known_handles": known},
+        )
+    hint = (f"Known handles in this project: {known}." if known else
+            "No data is loaded yet — start with skin.io.load_h5ad (one file) or "
+            "skin.io.build_multisample (several).")
+    return InvalidHandle(
+        f"unknown dataset handle {ref!r}",
+        remedy=hint,
+        suggested_tool="skin.memory.brief" if known else "skin.io.load_h5ad",
+        details={"given": ref, "known_handles": known},
+    )
+
+
 def load(project_id: str, dataset_id: str, *, copy: bool = False) -> AnnData:
     """Resolve a handle (or a human label) to an in-memory AnnData."""
     import anndata as ad
 
     resolved = store.resolve_dataset_ref(project_id, dataset_id)
     if resolved is None:
-        known = [d["dataset_id"] for d in store.list_datasets(project_id)][-10:]
-        raise InvalidHandle(
-            f"unknown dataset handle {dataset_id!r}",
-            remedy=f"Known handles in this project: {known or '(none yet)'}. "
-                   "Call skin.memory.brief to see the project state.",
-            suggested_tool="skin.memory.brief",
-        )
+        raise bad_handle(project_id, dataset_id)
     with _LOCK:
         if resolved in _CACHE:
             _CACHE.move_to_end(resolved)
@@ -235,9 +322,18 @@ def mint(
     u["op"] = op
     u["project_id"] = project_id
 
+    notes: list[str] = []
     if not path.exists():
-        _sanitize_for_h5ad(adata)
-        adata.write_h5ad(path, compression="gzip")
+        notes = _sanitize_for_h5ad(adata)
+        try:
+            adata.write_h5ad(path, compression=CONFIG.h5ad_compression)
+        except Exception:
+            # Never leave a half-written .h5ad behind: the handle would be
+            # registered but unreadable, and every later load would fail with a
+            # confusing error far from the cause.
+            path.unlink(missing_ok=True)
+            raise
+    _TLS.mint_notes = notes
 
     store.upsert_dataset(
         project_id, dsid, parent_id=parent_id, op=op, params=params, path=str(path),
@@ -248,8 +344,79 @@ def mint(
     return dsid
 
 
-def _sanitize_for_h5ad(adata: AnnData) -> None:
-    """Make uns/obs writable by h5py.
+#: h5py treats "/" as a group separator, so it can never appear in a key. Cell
+#: type labels routinely contain one — "MΦ-Res/Rep", "MΦ-IFN/AS DCs" — and
+#: scanpy stores rank_genes_groups results as structured arrays whose FIELD
+#: NAMES are those labels. Writing such an object raises
+#: "Forward slashes are not allowed in keys". We rename rather than drop, and
+#: record the mapping in uns["skinmcp"]["h5ad_key_renames"] so it stays
+#: traceable and reversible.
+_SLASH_SUB = "∕"  # U+2215 DIVISION SLASH — renders like "/", legal as a key
+
+
+def _safe_key(k: str, taken: set[str]) -> str:
+    out = str(k).replace("/", _SLASH_SUB)
+    if out in taken:
+        i = 2
+        while f"{out}_{i}" in taken:
+            i += 1
+        out = f"{out}_{i}"
+    return out
+
+
+def _deslash(obj: Any, renames: dict[str, str], path: str = "uns") -> Any:
+    """Recursively rename dict keys, DataFrame columns and structured-array
+    fields containing '/'. All three become h5py keys on write."""
+    import numpy as np
+    import pandas as pd
+
+    if isinstance(obj, pd.DataFrame):
+        bad = [c for c in obj.columns if "/" in str(c)]
+        if bad:
+            mapping: dict[Any, str] = {}
+            taken = {str(c) for c in obj.columns if "/" not in str(c)}
+            for c in bad:
+                nc = _safe_key(str(c), taken)
+                taken.add(nc)
+                mapping[c] = nc
+                renames[f"{path}.{c}"] = nc
+            obj = obj.rename(columns=mapping)
+        return obj
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            nk = str(k)
+            if "/" in nk:
+                nk = _safe_key(nk, set(out))
+                renames[f"{path}[{k!r}]"] = nk
+            out[nk] = _deslash(v, renames, f"{path}[{nk!r}]")
+        return out
+    if isinstance(obj, np.ndarray) and obj.dtype.names:
+        names = list(obj.dtype.names)
+        if any("/" in n for n in names):
+            new: list[str] = []
+            for n in names:
+                nn = _safe_key(n, set(new)) if "/" in n else n
+                if nn != n:
+                    renames[f"{path}.{n}"] = nn
+                new.append(nn)
+            # Build a new array rather than reassigning .dtype in place: the
+            # `names` field of a rank_genes_groups record is object dtype, and
+            # numpy refuses to reinterpret arrays holding references.
+            src = obj
+            obj = np.empty(src.shape,
+                           dtype=np.dtype([(nn, src.dtype[o])
+                                           for nn, o in zip(new, names)]))
+            for nn, o in zip(new, names):
+                obj[nn] = src[o]
+        return obj
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_deslash(v, renames, path) for v in obj)
+    return obj
+
+
+def _sanitize_for_h5ad(adata: AnnData) -> list[str]:
+    """Make uns/obs writable by h5py. Returns human-readable notes about fixes.
 
     Object-dtype obs columns and nested/heterogeneous uns entries are the two
     things that make `write_h5ad` throw after a long computation. Coerce them
@@ -257,6 +424,8 @@ def _sanitize_for_h5ad(adata: AnnData) -> None:
     """
     import numpy as np
     import pandas as pd
+
+    notes: list[str] = []
 
     for col in list(adata.obs.columns):
         s = adata.obs[col]
@@ -295,6 +464,26 @@ def _sanitize_for_h5ad(adata: AnnData) -> None:
         return str(v)
 
     adata.uns = {str(k): _clean(v) for k, v in adata.uns.items()}
+
+    # Rename any remaining "/"-bearing keys/fields. Done last so it also covers
+    # anything _clean produced.
+    renames: dict[str, str] = {}
+    adata.uns = _deslash(adata.uns, renames)
+    if renames:
+        # Stored as a JSON STRING, not a dict: the map is keyed by the ORIGINAL
+        # paths, which contain the very slashes we are working around — writing
+        # it as a dict would fail for exactly the same reason.
+        import json as _json
+
+        skinmcp_uns(adata)["h5ad_key_renames"] = _json.dumps(renames, ensure_ascii=False)
+        where = sorted({r.split("[")[1].split("]")[0].strip("'\"")
+                        if "[" in r else r.split(".")[0] for r in renames})
+        notes.append(
+            f"{len(renames)} uns keys/fields contained '/' and were renamed with "
+            f"U+2215 so the object could be written (h5py forbids '/' in keys). "
+            f"Affected: {where[:4]}. Cell labels in obs are UNCHANGED; the mapping "
+            f"is in uns['skinmcp']['h5ad_key_renames'].")
+    return notes
 
 
 # --------------------------------------------------------------------------- #

@@ -216,7 +216,7 @@ class TestClusteringAnnotation:
         import pandas as pd
 
         tab = pd.crosstab(a.obs[ck].astype(str), a.obs["true_celltype"].astype(str))
-        purity = (tab.max(1) / tab.sum(1))
+        purity = (tab.max(axis=1) / tab.sum(axis=1))
         assert purity.median() > 0.75, f"clusters are not clean: {purity.to_dict()}"
         assert a.obs[ck].nunique() >= 5
 
@@ -286,7 +286,7 @@ class TestDE:
         assert len(s["per_label"]) == 1
         row = s["per_label"][0]
         assert row["n_samples_Burn"] == 6 and row["n_samples_Sham"] == 6
-        df = pd.read_csv(row["table_path"]).set_index("gene")
+        df = pd.read_csv(s["tables"][row["label"]]).set_index("gene")
         for g in ("Arg1", "Nos2", "Spp1"):
             assert g in df.index, f"{g} missing from the DE table"
             assert df.loc[g, "lfc"] > 0.5, f"{g} should be up in Burn, got {df.loc[g, 'lfc']}"

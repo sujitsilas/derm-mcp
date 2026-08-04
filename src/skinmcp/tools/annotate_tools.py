@@ -181,6 +181,20 @@ def marker_report(dataset_id: str, cluster_key: str, top_n: int = 25, family: st
 
     key = f"rank_genes_{cluster_key}"
     if key not in adata.uns:
+        # marker_genes mints a new handle. If it has already run for this
+        # grouping, the table exists — just on a different handle — and telling
+        # the caller to "run it first" sends it round the same loop again.
+        have = registry.find_by_op(ctx.project_id, "cluster.marker_genes",
+                                   {"groupby": cluster_key})
+        if have:
+            raise BadParam(
+                f"this handle has no uns[{key!r}], but {have[-1]} does",
+                remedy=(f"skin.cluster.marker_genes already ran for "
+                        f"{cluster_key!r} and minted {have[-1]}. Re-issue this call "
+                        f"with dataset_id={have[-1]!r} — do not re-run marker_genes."),
+                suggested_tool="",
+                details={"given": dataset_id, "has_markers": have[-3:]},
+            )
         raise BadParam(
             f"no marker table under uns[{key!r}]",
             remedy=f"Run skin.cluster.marker_genes(dataset_id, groupby={cluster_key!r}) first.",
@@ -342,10 +356,46 @@ def apply_labels(dataset_id: str, cluster_key: str, mapping: dict[str, str], new
     vc = adata.obs[new_key].value_counts().reindex(final_order).to_dict()
     ctx.summary = {"dataset_id": dsid, "new_key": new_key, "n_labels": len(final_order),
                    "counts": vc, "palette": pal}
+    _warn_on_discards(ctx, vc, int(adata.n_obs))
     ctx.warn("Labels written. Record WHY with skin.memory.record_annotation — the mapping "
              "alone is not auditable, and it is the rationale a reviewer will ask for.")
     ctx.suggest("skin.memory.record_annotation", "skin.annotate.contamination_audit",
                 "skin.plot.umap")
+
+
+#: Substrings that mark a label as a bucket rather than a cell identity. Matched
+#: against labels the CALLER just wrote, not against columns in the user's data,
+#: so this is not the kind of name-guessing that _introspect.py exists to avoid.
+_DISCARD_WORDS = ("other", "unknown", "unassigned", "low quality", "lowqual",
+                  "low-quality", "doublet", "junk", "debris", "mixed", "ambiguous",
+                  "artifact", "exclude", "discard", "n/a")
+
+
+def _warn_on_discards(ctx: Ctx, counts: dict[str, Any], n_obs: int) -> None:
+    """Flag a labelling that quietly bins a large share of cells.
+
+    Over-clustering makes this easy to do by accident: 14 clusters from 20k
+    neutrophils, four of them hard to name, and 44% of the population lands in
+    "Other"/"Low Quality" with every tool reporting success. Genuine debris
+    (mitochondrial-high, erythrocyte, a stray lineage) is usually a few percent;
+    much beyond that is normally real cells whose cluster was never identified.
+    """
+    if not n_obs:
+        return
+    binned = {k: int(v or 0) for k, v in counts.items()
+              if any(w in str(k).lower() for w in _DISCARD_WORDS)}
+    n = sum(binned.values())
+    pct = 100.0 * n / n_obs
+    if pct >= 15.0:
+        ctx.warn(
+            f"{pct:.0f}% of cells ({n}/{n_obs}) were labelled {sorted(binned)} rather "
+            f"than a cell identity. Debris is usually a few percent, so check these are "
+            f"really discardable before dropping them: a cluster of genuine cells that "
+            f"was merely hard to name belongs in the analysis. Over-clustering is the "
+            f"usual cause — a lower leiden resolution often removes the ambiguity. "
+            f"skin.annotate.contamination_audit distinguishes contamination from "
+            f"unnamed biology."
+        )
 
 
 # --------------------------------------------------------------------------- #

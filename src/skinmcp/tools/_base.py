@@ -13,6 +13,7 @@ import functools
 import inspect
 import logging
 import random
+import threading
 import time
 import traceback
 from collections.abc import Callable
@@ -27,6 +28,39 @@ from ..returns import Artifact, ToolResult, enforce_budget, jsonable
 from ..runtimes import python_manifest
 
 logger = logging.getLogger(__name__)
+
+#: Last (tool, error) seen and how many times running. Guarded by a lock because
+#: the MCP SDK runs every sync tool in a worker thread, so this is shared state.
+_REPEAT_LOCK = threading.Lock()
+_REPEAT: dict[str, Any] = {"key": None, "n": 0}
+
+
+def _count_repeat(tool: str, err_text: str) -> int:
+    """How many times in a row this exact tool+error has occurred (1 = first)."""
+    key = f"{tool}\n{err_text}"
+    with _REPEAT_LOCK:
+        if _REPEAT["key"] == key:
+            _REPEAT["n"] += 1
+        else:
+            _REPEAT["key"], _REPEAT["n"] = key, 1
+        return int(_REPEAT["n"])
+
+
+def _clear_repeat() -> None:
+    """Any success breaks the streak."""
+    with _REPEAT_LOCK:
+        _REPEAT["key"], _REPEAT["n"] = None, 0
+
+
+def _brief_params(params: dict[str, Any]) -> str:
+    """Params for one log line: identifying ones only, values kept short."""
+    out = []
+    for k, v in params.items():
+        if k in ("ctx", "seed", "dry_run") or v in (None, "", [], {}):
+            continue
+        s = str(v)
+        out.append(f"{k}={s[:60] + '...' if len(s) > 60 else s}")
+    return ", ".join(out[:6])
 
 
 @dataclass
@@ -108,6 +142,19 @@ class Ctx:
         if msg not in self.warnings:
             self.warnings.append(msg)
 
+    def mint(self, adata: Any, **kw: Any) -> str:
+        """registry.mint + surface any sanitisation notes as warnings.
+
+        Tools should use this rather than calling registry.mint directly, so a
+        silent key rename never escapes unreported.
+        """
+        from .. import registry
+
+        dsid = registry.mint(self.project_id, adata, **kw)
+        for note in registry.take_mint_notes():
+            self.warn(note)
+        return dsid
+
     def suggest(self, *tools: str) -> None:
         for t in tools:
             if t not in self.next_tools:
@@ -134,13 +181,50 @@ class Ctx:
                 pass
         return aid
 
+    def adopt_output_dir(self, source: Path | str) -> None:
+        """On the first load, write results beside the data.
+
+        Only ever sets an unset value, so an explicit
+        `open_project(output_dir=...)` and any later load both stand.
+        """
+        if store.get_output_dir(self.project_id):
+            return
+        try:
+            src = Path(source).expanduser().resolve()
+            # 10x/mtx loaders are handed a directory; everything else a file.
+            d = src if src.is_dir() else src.parent
+            if d.is_dir():
+                store.set_output_dir(self.project_id, str(d))
+                self.warn(f"Figures and tables for this project will be written to {d} "
+                          f"(beside the data). Pass output_dir= to open_project to change it.")
+        except OSError:
+            pass
+
+    def outroot(self) -> Path:
+        """Where this project's figures and tables are written.
+
+        Defaults to the directory the data was loaded from, so results land
+        beside the .h5ad the user pointed at rather than inside a dotfile the
+        host app cannot even list. `skin.memory.open_project(output_dir=...)`
+        overrides it. Falls back to the project dir when nothing is set.
+        """
+        configured = store.get_output_dir(self.project_id)
+        if configured:
+            d = Path(configured).expanduser()
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                return d
+            except OSError as e:
+                self.warn(f"output_dir {d} is not writable ({e}); using the project dir.")
+        return CONFIG.ensure_project_dirs(self.project_id)
+
     def figdir(self, group: str = "") -> Path:
-        d = CONFIG.ensure_project_dirs(self.project_id) / "figures" / (group or "misc")
+        d = self.outroot() / "figures" / (group or "misc")
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def tabledir(self) -> Path:
-        d = CONFIG.ensure_project_dirs(self.project_id) / "tables"
+        d = self.outroot() / "tables"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -203,6 +287,10 @@ def tool(
             seed = int(params.get("seed", 0) or 0)
             dry_run = bool(params.get("dry_run", False))
             _seed_everything(seed)
+            # Every call, not just failures: a log of errors alone cannot show
+            # which tool the caller reached for instead of the right one, and
+            # that turned out to be the whole story in one stuck session.
+            logger.info("-> %s(%s)", name, _brief_params(params))
 
             project_id = ""
             ctx: Ctx | None = None
@@ -218,9 +306,29 @@ def tool(
                 kwargs2["ctx"] = ctx
                 fn(*args, **kwargs2)
                 ok, err_payload, err_text = True, None, ""
+                _clear_repeat()
             except SkinMCPError as e:
-                ok, err_payload, err_text = False, e.to_dict(), f"{e.code}: {e.message}"
+                # jsonable() on the error too, not just the summary: `details`
+                # routinely carries pandas objects, and a MultiIndex .to_dict()
+                # has tuple keys that json.dumps refuses. Left uncoerced, that
+                # TypeError escaped this handler entirely and killed the process.
+                ok, err_payload = False, jsonable(e.to_dict())
+                err_text = f"{e.code}: {e.message}"
                 logger.warning("%s failed: %s", name, err_text)
+                n = _count_repeat(name, err_text)
+                if n >= 3:
+                    # The same call failing the same way is a caller stuck in a
+                    # loop; a well-formed error it has already ignored twice will
+                    # not land the third time. One real session repeated an
+                    # identical failing call seventeen times in seventy seconds.
+                    err_payload["remedy"] = (
+                        f"STOP. This exact call has now failed {n} times with the same "
+                        f"error, so repeating it will not work. Do something different: "
+                        f"{err_payload.get('suggested_tool') or 'a different tool'} is the "
+                        f"one to call, or ask the user rather than guessing again. "
+                        f"Original guidance: {err_payload.get('remedy', '')}"
+                    )
+                    err_payload["repeated_failures"] = n
             except Exception as e:  # noqa: BLE001 - boundary: nothing escapes as a traceback
                 ok = False
                 err_text = f"{type(e).__name__}: {e}"
@@ -249,34 +357,77 @@ def tool(
                     error=err_payload, next_suggested_tools=ctx.next_tools,
                 ).model_dump()
 
-            step_id = store.record_step(
-                project_id, tool=name, params=params, inputs=ctx.inputs,
-                outputs={"dataset_id": ctx.dataset_id,
-                         "artifacts": [a.id for a in ctx.artifacts],
-                         "code_executable": ctx.code_executable},
-                code=ctx.code, versions=python_manifest.capture(name), seed=seed,
-                started_at=started, duration_s=dur, ok=ok, error=err_text,
-            )
-            ctx.step_id = step_id
-            for a in ctx.artifacts:
-                store.record_artifact(project_id, a.id, step_id, a.kind, a.path, a.caption, params)
+            # Everything from here on is bookkeeping and serialisation. It runs
+            # OUTSIDE the try/except above, so any failure here — a value that
+            # will not serialise, a full disk, a locked database — used to escape
+            # the wrapper and kill the server process. To the client that looks
+            # like "MCP error -32000: Connection closed" and the whole session is
+            # lost, including work that had already succeeded. Nothing in this
+            # block is worth that, so it degrades instead.
+            try:
+                step_id = store.record_step(
+                    project_id, tool=name, params=params, inputs=ctx.inputs,
+                    outputs={"dataset_id": ctx.dataset_id,
+                             "artifacts": [a.id for a in ctx.artifacts],
+                             "code_executable": ctx.code_executable},
+                    code=ctx.code, versions=python_manifest.capture(name), seed=seed,
+                    started_at=started, duration_s=dur, ok=ok, error=err_text,
+                )
+                ctx.step_id = step_id
+                for a in ctx.artifacts:
+                    store.record_artifact(project_id, a.id, step_id, a.kind, a.path,
+                                          a.caption, params)
+            except Exception as e:  # noqa: BLE001 - provenance must not be fatal
+                logger.error("%s: provenance write failed: %s\n%s", name, e,
+                             traceback.format_exc())
+                step_id = 0
+                ctx.warn(f"This step could not be written to the provenance log "
+                         f"({type(e).__name__}). The result below is still valid, but it "
+                         f"will not appear in the exported notebook.")
 
             if dry_run and ok:
                 ctx.warn("dry_run=True — nothing was executed or written. "
                          "Re-run with dry_run=False to apply.")
 
-            result = ToolResult(
-                ok=ok,
-                dataset_id=ctx.dataset_id,
-                summary=jsonable(ctx.summary),
-                warnings=ctx.warnings,
-                artifacts=ctx.artifacts,
-                code=ctx.code,
-                memory_ref=f"step_{step_id:05d}",
-                next_suggested_tools=ctx.next_tools,
-                error=err_payload,
-            )
-            return enforce_budget(result.model_dump(), project_id=project_id, step_id=step_id)
+            # Artifact paths are emitted relative to the project directory. The
+            # absolute path is already in the artifact table; repeating a long
+            # prefix on every one of 8+ artifacts costs more of the return budget
+            # than the per-label results it would otherwise displace.
+            root = str(CONFIG.project_dir(project_id))
+            arts = [a.model_copy(update={"path": a.path[len(root) + 1:]})
+                    if a.path.startswith(root) else a for a in ctx.artifacts]
+
+            try:
+                result = ToolResult(
+                    ok=ok,
+                    dataset_id=ctx.dataset_id,
+                    summary=jsonable(ctx.summary),
+                    warnings=ctx.warnings,
+                    artifacts=arts,
+                    code=ctx.code,
+                    memory_ref=f"step_{step_id:05d}",
+                    next_suggested_tools=ctx.next_tools,
+                    error=err_payload,
+                )
+                return enforce_budget(result.model_dump(), project_id=project_id,
+                                      step_id=step_id)
+            except Exception as e:  # noqa: BLE001 - last line of defence
+                logger.error("%s: could not serialise the result: %s\n%s", name, e,
+                             traceback.format_exc())
+                return ToolResult(
+                    ok=False,
+                    error={"code": "INTERNAL",
+                           "message": f"result could not be serialised: "
+                                      f"{type(e).__name__}: {e}",
+                           "remedy": "This is a bug in skin-mcp — the work may have "
+                                     "completed, but its result could not be returned. "
+                                     "The server is still running; the traceback is on "
+                                     "its stderr. Check skin.memory.timeline to see "
+                                     "whether the step was recorded."},
+                    warnings=[w for w in ctx.warnings][:5],
+                    memory_ref=f"step_{step_id:05d}" if step_id else "",
+                    next_suggested_tools=["skin.memory.timeline", "skin.io.describe"],
+                ).model_dump()
 
         # functools.wraps copies the tool function's annotations, including
         # `-> None`. The MCP SDK builds its output schema from that annotation

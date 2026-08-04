@@ -128,3 +128,97 @@ def test_steps_capture_versions(loaded):
     s = store.get_steps(pid, limit=5, include_code=True)[-1]
     v = _json.loads(s["versions_json"])
     assert "scanpy" in v and "python" in v
+
+
+class TestNothingCanKillTheProcess:
+    """A tool must never take the server down.
+
+    An exception escaping the decorator surfaces to the client as
+    `MCP error -32000: Connection closed`, and the whole session — including work
+    that already succeeded — is lost. This actually happened: a pandas MultiIndex
+    reached the error payload, `json.dumps` refused its tuple keys, and the
+    TypeError escaped because the error payload was not coerced and the
+    post-processing block sat outside the try/except.
+    """
+
+    @staticmethod
+    def _temp_tool(name):
+        """Register a throwaway tool and remove it again.
+
+        Leaving it in the global REGISTRY would change the tool count and the
+        schema-test parametrisation depending on import order.
+        """
+        import contextlib
+
+        from skinmcp.tools._base import REGISTRY
+
+        @contextlib.contextmanager
+        def cm():
+            try:
+                yield
+            finally:
+                REGISTRY.pop(name, None)
+
+        return cm()
+
+    def test_unserialisable_summary_degrades_instead_of_raising(self, project):
+        from skinmcp.tools._base import Ctx, tool
+
+        @tool("skin.help.__unserialisable", category="help", summary="test only")
+        def _bad(project_id: str = "", dry_run: bool = False, seed: int = 0,
+                 *, ctx: Ctx) -> None:
+            """Emit something json cannot represent.
+
+            Args:
+                project_id: project.
+                dry_run: unused.
+                seed: unused.
+            """
+            ctx.summary = {("a", "b"): "tuple key", "obj": object()}
+
+        with self._temp_tool("skin.help.__unserialisable"):
+            r = _bad(project_id=project)       # must return, not raise
+            assert isinstance(r, dict)
+            assert r["ok"] in (True, False)
+            json.dumps(r)                      # and the result itself must serialise
+
+    def test_unserialisable_error_details_degrade(self, project):
+        import pandas as pd
+
+        from skinmcp.errors import BadParam
+        from skinmcp.tools._base import Ctx, tool
+
+        @tool("skin.help.__baderror", category="help", summary="test only")
+        def _raiser(project_id: str = "", dry_run: bool = False, seed: int = 0,
+                    *, ctx: Ctx) -> None:
+            """Raise with details carrying a MultiIndex.
+
+            Args:
+                project_id: project.
+                dry_run: unused.
+                seed: unused.
+            """
+            s = pd.DataFrame({"a": ["x", "y"], "b": ["p", "q"], "n": [1, 2]}) \
+                .groupby(["a", "b"], observed=True)["n"].sum()
+            raise BadParam("nope", details={"cells": s.to_dict()})
+
+        with self._temp_tool("skin.help.__baderror"):
+            r = _raiser(project_id=project)
+            assert r["ok"] is False
+            assert r["error"]["code"] == "BAD_PARAM"
+            json.dumps(r)                      # tuple keys must have been coerced
+
+    def test_provenance_failure_is_not_fatal(self, project, monkeypatch):
+        import sqlite3
+
+        from skinmcp.memory import store
+        from skinmcp.tools import io_tools
+
+        def boom(*a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(store, "record_step", boom)
+        r = io_tools.lineage(project_id=project)
+        assert isinstance(r, dict)
+        assert any("provenance log" in w for w in r["warnings"]), \
+            "a failed provenance write should warn, not crash"

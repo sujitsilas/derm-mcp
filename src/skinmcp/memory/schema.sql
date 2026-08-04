@@ -12,7 +12,11 @@ CREATE TABLE IF NOT EXISTS project (
   organism     TEXT,
   created_at   TEXT,
   description  TEXT,
-  design_notes TEXT
+  design_notes TEXT,
+  -- Where figures and tables are written. Empty = the project dir under
+  -- ~/.skinmcp, which is hidden and often unreadable by the host app; on first
+  -- load we point it at the directory the .h5ad came from instead.
+  output_dir   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS dataset (
@@ -120,9 +124,7 @@ CREATE TABLE IF NOT EXISTS run (
 );
 CREATE INDEX IF NOT EXISTS ix_run_project ON run(project_id, kind);
 
--- Full-text search over the free-text reasoning: annotation rationales,
--- decision rationales, and notes. This is what makes a three-week-old project
--- resumable.
-CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-  kind, ref_id UNINDEXED, project_id UNINDEXED, title, body
-);
+-- Free-text reasoning (annotation rationales, decisions, notes) is stored and
+-- recalled semantically by mem0 (see memory/semantic.py). The rows above remain
+-- the durable record; mem0 owns the index over them. The former FTS5 virtual
+-- table has been removed.

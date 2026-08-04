@@ -118,3 +118,9 @@ reference/macrophages_resident_recruited.ipynb
 scratch/
 tmp/
 .tmp/
+
+# ─── Third-party source checkouts ─────────────────────────────────────────────
+# mem0 is a declared dependency (`pip install -e .[memory]`, PyPI: mem0ai), not
+# vendored source. A local clone here is only for reading or patching upstream;
+# it must not be committed, and nothing in skinmcp imports from it by path.
+mem0-main/

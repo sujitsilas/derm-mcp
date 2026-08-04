@@ -1,0 +1,11 @@
+{
+  "artifact_id": "art_9a3e2da2",
+  "tool": "skin.abundance.milo_py",
+  "project_id": "proj_811a38ce",
+  "dataset_id": "ds_9522510e",
+  "caption": "Milo neighbourhood graph Burn vs Sham",
+  "params": {
+    "run_id": "da_b9a18068"
+  },
+  "created_at": "2026-08-04T05:29:48+00:00"
+}

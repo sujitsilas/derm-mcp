@@ -125,18 +125,58 @@ def _size(payload: dict[str, Any]) -> int:
     return len(json.dumps(payload, ensure_ascii=False, default=str).encode())
 
 
-def _shrink_in_place(obj: Any, list_cap: int) -> Any:
-    """Recursively cap list lengths and string lengths."""
+def _clip_strings(obj: Any, max_len: int = 600) -> Any:
     if isinstance(obj, list):
-        capped = [_shrink_in_place(x, list_cap) for x in obj[:list_cap]]
-        if len(obj) > list_cap:
-            capped.append(f"...{len(obj) - list_cap} more")
-        return capped
+        return [_clip_strings(x, max_len) for x in obj]
     if isinstance(obj, dict):
-        return {k: _shrink_in_place(v, list_cap) for k, v in obj.items()}
-    if isinstance(obj, str) and len(obj) > 600:
-        return obj[:600] + "…[truncated]"
+        return {k: _clip_strings(v, max_len) for k, v in obj.items()}
+    if isinstance(obj, str) and len(obj) > max_len:
+        return obj[:max_len] + "…[truncated]"
     return obj
+
+
+def _list_paths(obj: Any, path: tuple = ()) -> list[tuple[tuple, int, int]]:
+    """Every list in the payload as (path, n_items, serialized_bytes)."""
+    out: list[tuple[tuple, int, int]] = []
+    if isinstance(obj, list):
+        if len(obj) > 1:
+            out.append((path, len(obj), _size({"_": obj})))
+        for i, v in enumerate(obj):
+            out += _list_paths(v, path + (i,))
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            out += _list_paths(v, path + (k,))
+    return out
+
+
+def _at(obj: Any, path: tuple) -> Any:
+    for p in path:
+        obj = obj[p]
+    return obj
+
+
+def _shrink_largest_list(payload: dict[str, Any]) -> bool:
+    """Truncate the single biggest list by a quarter. Returns False if none left.
+
+    Shrinking every list by the same cap penalises a tool's primary result — the
+    per-label DE table — as hard as a long list of artifact paths. Going after
+    the largest one repeatedly frees the most bytes per item dropped, and needs
+    no knowledge of which field a given tool considers important.
+    """
+    lists = _list_paths(payload)
+    if not lists:
+        return False
+    path, n, _ = max(lists, key=lambda t: t[2])
+    keep = max(1, (n * 3) // 4)
+    if keep >= n:
+        keep = n - 1
+    if keep < 1:
+        return False
+    target = _at(payload, path[:-1]) if path else payload
+    new = list(_at(payload, path))[:keep] + [f"...{n - keep} more"]
+    if path:
+        target[path[-1]] = new
+    return True
 
 
 def enforce_budget(
@@ -167,22 +207,36 @@ def enforce_budget(
         except Exception:  # noqa: BLE001 - spilling is best-effort, never fatal
             spill_uri = ""
 
-    for cap in (20, 10, 5, 3):
-        payload = _shrink_in_place(payload, cap)
-        if _size(payload) <= limit:
-            payload["truncated"] = True
-            if spill_uri:
-                payload.setdefault("warnings", []).append(f"Full return spilled to {spill_uri}")
-            return payload
+    # Add the spill pointer and the truncated flag BEFORE measuring. Appending
+    # them afterwards pushed the payload back over the limit, so returns could
+    # exceed the budget they had just been trimmed to fit.
+    payload["truncated"] = True
+    if spill_uri:
+        payload.setdefault("warnings", []).append(f"Full return spilled to {spill_uri}")
 
+    def _done(p: dict[str, Any]) -> dict[str, Any]:
+        return p
+
+    # `code` goes first. It is the largest field on analysis tools and the least
+    # actionable one to read inline — it is already persisted in the step row and
+    # assembled into the exported notebook. Shrinking summary lists ahead of it
+    # would drop per-label results the caller needs while keeping a code listing
+    # it does not.
     code = payload.get("code", "")
-    if code:
-        payload["code"] = code[:400] + "\n# …full code in the exported notebook"
+    if code and len(code) > 300:
+        payload["code"] = code[:300] + "\n# …full code in the step record and exported notebook"
         if _size(payload) <= limit:
-            payload["truncated"] = True
-            if spill_uri:
-                payload.setdefault("warnings", []).append(f"Full return spilled to {spill_uri}")
-            return payload
+            return _done(payload)
+
+    payload = _clip_strings(payload)
+    if _size(payload) <= limit:
+        return _done(payload)
+
+    for _ in range(200):
+        if not _shrink_largest_list(payload):
+            break
+        if _size(payload) <= limit:
+            return _done(payload)
 
     keep = {
         "ok": payload.get("ok", True),

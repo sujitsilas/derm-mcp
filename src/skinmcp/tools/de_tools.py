@@ -60,6 +60,38 @@ def _aggregate_pseudobulk(adata: Any, label_key: str, sample_key: str, labels: l
     return counts, meta, dropped
 
 
+def _blocking_factors(adata: Any, covariates: list[str] | None, condition_key: str,
+                      ctx: Any) -> list[str]:
+    """Resolve the blocking factors for the design, defaulting to none.
+
+    Two rules, both learned the hard way:
+
+    * The condition can never also be a blocking factor. Every level of it holds
+      exactly one arm, so the "does this level contain both arms?" balance check
+      drops every unit and the run dies as INSUFFICIENT_REPLICATES with a plan
+      that plainly had enough replicates.
+    * There is no safe *named* default. This used to default to ``["Timepoint"]``,
+      which silently changed the model for anyone who happened to have that
+      column and broke outright for anyone contrasting across it. Blocking is the
+      caller's scientific choice; we surface the candidates instead of guessing.
+    """
+    covs = [c for c in (covariates if covariates is not None else [])
+            if c in adata.obs.columns]
+    if condition_key in covs:
+        covs = [c for c in covs if c != condition_key]
+        ctx.warn(f"{condition_key!r} is the contrast variable, so it cannot also block "
+                 f"the design; dropped it from covariates.")
+    if covariates is None:
+        from ._introspect import confounding_candidates
+
+        cand = [c for c in confounding_candidates(adata, condition_key) if c != condition_key]
+        if cand:
+            ctx.warn(f"Design is unblocked (no covariates given). Candidate blocking "
+                     f"factors in this object: {cand[:5]}. Pass covariates=[...] to "
+                     f"include them.")
+    return covs
+
+
 def _sample_metadata(adata: Any, sample_key: str, cols: list[str]) -> Any:
     """One row per sample for the design matrix."""
     import pandas as pd
@@ -148,8 +180,7 @@ def pseudobulk(
         raise NotFound(f"contrast levels not present: {missing}",
                        remedy=f"Levels in {condition_key!r}: {sorted(levels)}")
 
-    covs = list(covariates) if covariates is not None else ["Timepoint"]
-    covs = [c for c in covs if c in adata.obs.columns]
+    covs = _blocking_factors(adata, covariates, condition_key, ctx)
     labels = [str(x) for x in (groups or adata.obs[label_key].astype(str).unique())]
     grp_excl = list(exclude_gene_groups) if exclude_gene_groups is not None else ["immune_de"]
     matched = K.match_gene_groups(organism, grp_excl, adata.var_names) if grp_excl else {}
@@ -191,9 +222,13 @@ def pseudobulk(
         "for lb in LABELS:\n"
         "    sel = meta['label'] == lb\n"
         "    m, c = meta[sel].copy(), pb[sel].copy()\n"
+        "    # keep only the two arms being contrasted, before gene filtering:\n"
+        "    # other levels of the condition would become NaN in the design below\n"
+        f"    in_arms = m[{condition_key!r}].astype(str).isin([{a!r}, {b!r}]).to_numpy()\n"
+        "    m, c = m.loc[in_arms], c.loc[in_arms]\n"
         f"    m[{condition_key!r}] = pd.Categorical(m[{condition_key!r}], "
         f"categories=[{b!r}, {a!r}])\n"
-        f"    c = c.loc[:, c.sum(0) >= {min_count_sum}]\n"
+        f"    c = c.loc[:, c.sum(axis=0) >= {min_count_sum}]\n"
         f"    dds = DeseqDataSet(counts=c.astype(int), metadata=m, design={design!r},\n"
         "                       quiet=True)\n"
         "    dds.deseq2()\n"
@@ -257,6 +292,13 @@ def pseudobulk(
         sel = (meta["label"] == lb).to_numpy()
         m = meta.loc[sel].copy()
         c = counts.loc[sel].copy()
+        # Keep only the two arms being contrasted. A condition column with more
+        # than two levels (four timepoints, say) otherwise carries the other
+        # levels all the way to PyDESeq2, where the design's Categorical turns
+        # them into NaN; it then drops those rows internally and dies on an
+        # index that no longer matches the counts it was handed.
+        in_arms = m[condition_key].astype(str).isin([a, b]).to_numpy()
+        m, c = m.loc[in_arms], c.loc[in_arms]
         arm = m[condition_key].astype(str)
         na, nb = int((arm == a).sum()), int((arm == b).sum())
         if na < min_samples_per_arm or nb < min_samples_per_arm:
@@ -289,7 +331,7 @@ def pseudobulk(
                                       "covariate levels"})
             continue
 
-        c = c.loc[:, c.sum(0) >= min_count_sum]
+        c = c.loc[:, c.sum(axis=0) >= min_count_sum]
         if c.shape[1] < 50:
             skipped.append({"label": lb, "reason": f"only {c.shape[1]} genes pass "
                                                    f"min_count_sum={min_count_sum}"})
@@ -339,14 +381,18 @@ def pseudobulk(
         res.sort_values("padj").to_csv(p, index=False)
         aid = ctx.add_artifact("table", p, caption=f"pseudobulk DE {lb}: {a} vs {b}",
                                params={"design": d, "contrast": [a, b], "run_id": run_id})
-        tables[lb] = str(p)
         per_label.append({
             "label": lb, "n_genes_tested": int(len(res)),
             "n_up": int(((res.padj < 0.05) & (res.lfc > 0.5)).sum()),
             "n_down": int(((res.padj < 0.05) & (res.lfc < -0.5)).sum()),
-            f"n_samples_{a}": na, f"n_samples_{b}": nb, "design": d,
-            "table_artifact_id": aid, "table_path": str(p),
+            f"n_samples_{a}": na, f"n_samples_{b}": nb,
+            # `design` and the full table paths are reported once at top level
+            # rather than repeated per label — with 8+ cell types the repetition
+            # alone pushes the return past the 4 KB budget and the caller loses
+            # the per-label counts entirely.
+            "table_artifact_id": aid,
         })
+        tables[lb] = str(p)
 
     if not per_label:
         raise InsufficientReplicates(
@@ -381,9 +427,15 @@ def pseudobulk(
     ctx.summary = {
         "run_id": run_id, "method": "pydeseq2", "inference_level": "sample",
         "design": design, "contrast": [a, b], "per_label": per_label,
-        "dropped_levels": dropped_levels[:10], "skipped": skipped[:10],
+        # A dict, not a per-label field: the budget's list-shrinking cannot reach
+        # into a dict, so every label's result table stays addressable even when
+        # per_label itself gets trimmed.
+        "tables": tables,
+        "dropped_levels": dropped_levels[:4], "skipped": skipped[:6],
         "n_excluded_genes": len(excluded),
-        "dropped_units": dropped_units[:8],
+        # Count plus a couple of examples: the full list is reconstructible from
+        # min_cells and is rarely acted on line by line.
+        "n_dropped_units": len(dropped_units), "dropped_units": dropped_units[:2],
     }
     ctx.suggest("skin.plot.volcano_grid", "skin.enrich.ora", "skin.de.compare_methods")
 
@@ -600,10 +652,13 @@ def timepoint_interaction(dataset_id: str, label_key: str, condition_key: str,
             skipped.append({"label": lb, "reason": "interaction needs >= "
                             f"{min_samples_per_arm} samples in every condition x timepoint "
                             f"cell; smallest is {int(cells.min()) if len(cells) else 0}",
-                            "cells": cells.to_dict()})
+                            # A groupby over two keys yields a MultiIndex, whose
+                            # .to_dict() has TUPLE keys — not representable in JSON.
+                            "cells": {" x ".join(map(str, k)): int(v)
+                                      for k, v in cells.items()}})
             continue
         md = m[[condition_key, time_key]].astype(str).astype("category")
-        c = c.loc[:, c.sum(0) >= 10]
+        c = c.loc[:, c.sum(axis=0) >= 10]
         try:
             dds = DeseqDataSet(counts=c.astype(int), metadata=md, design=design, quiet=True)
             dds.deseq2()
@@ -681,8 +736,11 @@ def pseudobulk_matrix(dataset_id: str, label_key: str, sample_key: str = "Sample
     labels = [str(x) for x in (groups or adata.obs[label_key].astype(str).unique())]
     counts, meta, dropped = _aggregate_pseudobulk(adata, label_key, sample_key, labels,
                                                   min_cells)
-    keys = metadata_keys or [c for c in ("Type", "Timepoint", "Batch", "Sex", "Replicate")
-                             if c in adata.obs.columns]
+    # Sample-level attributes are the columns that are CONSTANT within each
+    # sample. That definition holds whatever they are named, unlike a fixed list.
+    from . import _introspect as I
+
+    keys = metadata_keys or I.sample_level_columns(adata, sample_key)
     meta = meta.join(_sample_metadata(adata, sample_key, keys), on="sample")
     if dry_run:
         ctx.summary = {"shape": list(counts.shape), "n_units": int(len(meta))}
@@ -796,8 +854,7 @@ def deseq2_r(dataset_id: str, label_key: str, condition_key: str, contrast: list
     resolved = store.resolve_dataset_ref(ctx.project_id, dataset_id)
     ctx.dataset_id = resolved
     a, b = str(contrast[0]), str(contrast[1])
-    covs = list(covariates) if covariates is not None else ["Timepoint"]
-    covs = [c for c in covs if c in adata.obs.columns]
+    covs = _blocking_factors(adata, covariates, condition_key, ctx)
     labels = [str(x) for x in (groups or adata.obs[label_key].astype(str).unique())]
     if dry_run:
         ctx.summary = {"backend": "R DESeq2", "labels": labels, "contrast": [a, b],

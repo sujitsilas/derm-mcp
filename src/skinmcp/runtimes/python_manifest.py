@@ -92,6 +92,5 @@ def full_manifest() -> dict[str, object]:
         "pinned": {
             "py_monocle_commit": CONFIG.py_monocle_commit,
             "cellxgene_census_version": CONFIG.census_version,
-            "r_image": CONFIG.r_image,
         },
     }

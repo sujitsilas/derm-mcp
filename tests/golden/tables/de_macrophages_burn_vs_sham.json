@@ -1,0 +1,16 @@
+{
+  "artifact_id": "art_1d7ce69d",
+  "tool": "skin.de.pseudobulk",
+  "project_id": "proj_be4fa9c0",
+  "dataset_id": "ds_5d601a0d",
+  "caption": "pseudobulk DE Macrophages: Burn vs Sham",
+  "params": {
+    "design": "~ Timepoint + Type",
+    "contrast": [
+      "Burn",
+      "Sham"
+    ],
+    "run_id": "de_9704b1f9"
+  },
+  "created_at": "2026-08-04T06:14:44+00:00"
+}

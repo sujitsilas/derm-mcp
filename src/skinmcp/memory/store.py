@@ -58,9 +58,22 @@ def connect(project_id: str) -> sqlite3.Connection:
         conn = sqlite3.connect(root / "memory.db", check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         conn.commit()
         _CONNS[project_id] = conn
         return conn
+
+
+#: Columns added after the first release. CREATE TABLE IF NOT EXISTS leaves an
+#: existing database untouched, so new columns need an explicit ALTER.
+_ADDED_COLUMNS = (("project", "output_dir", "TEXT"),)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, col, decl in _ADDED_COLUMNS:
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if col not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
 
 def close_all() -> None:
@@ -73,14 +86,13 @@ def close_all() -> None:
         _CONNS.clear()
 
 
-def _fts_index(conn: sqlite3.Connection, kind: str, ref_id: Any, project_id: str,
-               title: str, body: str) -> None:
-    if not body:
-        return
-    conn.execute(
-        "INSERT INTO memory_fts (kind, ref_id, project_id, title, body) VALUES (?,?,?,?,?)",
-        (kind, str(ref_id), project_id, title or "", body),
-    )
+def _remember(project_id: str, kind: str, ref_id: Any, title: str, body: str,
+              author: str = "model") -> None:
+    """Hand free text to mem0. Replaces the FTS5 index this used to maintain."""
+    from . import semantic
+
+    semantic.remember(project_id, kind, f"{title}\n{body}".strip() if title else body,
+                      metadata={"ref_id": ref_id, "title": title}, author=author)
 
 
 # --------------------------------------------------------------------------- #
@@ -105,6 +117,20 @@ def get_project(project_id: str) -> dict[str, Any] | None:
     conn = connect(project_id)
     row = conn.execute("SELECT * FROM project WHERE project_id=?", (project_id,)).fetchone()
     return dict(row) if row else None
+
+
+def set_output_dir(project_id: str, path: str) -> None:
+    """Point this project's figures/ and tables/ at `path`."""
+    conn = connect(project_id)
+    with _LOCK:
+        conn.execute("UPDATE project SET output_dir=? WHERE project_id=?", (path, project_id))
+        conn.commit()
+
+
+def get_output_dir(project_id: str) -> str:
+    """The configured output directory, or "" to mean the project dir."""
+    proj = get_project(project_id) or {}
+    return str(proj.get("output_dir") or "")
 
 
 def find_project_by_name(name: str) -> dict[str, Any] | None:
@@ -264,7 +290,7 @@ def record_annotation(project_id: str, dataset_id: str, obs_key: str, cluster: s
              rationale, float(confidence), author, now()),
         )
         aid = int(cur.lastrowid)
-        _fts_index(conn, "annotation", aid, project_id, f"{obs_key}:{cluster} -> {label}", rationale)
+        _remember(project_id, "annotation", aid, f"{obs_key}:{cluster} -> {label}", rationale, author)
         conn.commit()
         return aid
 
@@ -303,8 +329,8 @@ def revise_annotation(project_id: str, annotation_id: int, new_label: str,
         new_id_ = int(cur.lastrowid)
         conn.execute("UPDATE annotation SET superseded_by=? WHERE annotation_id=?",
                      (new_id_, annotation_id))
-        _fts_index(conn, "annotation", new_id_, project_id,
-                   f"revised {old['obs_key']}:{old['cluster']} -> {new_label}", rationale)
+        _remember(project_id, "annotation", new_id_,
+                  f"revised {old['obs_key']}:{old['cluster']} -> {new_label}", rationale, author)
         conn.commit()
     return new_id_
 
@@ -322,7 +348,7 @@ def set_param(project_id: str, name: str, value: Any, scope: str, set_by: str,
             " VALUES (?,?,?,?,?,?,?)",
             (project_id, name, _dumps(value), scope or "global", set_by, rationale, now()),
         )
-        _fts_index(conn, "parameter", f"{name}@{scope}", project_id, name, rationale)
+        _remember(project_id, "parameter", f"{name}@{scope}", name, rationale, set_by)
         conn.commit()
 
 
@@ -360,7 +386,7 @@ def record_decision(project_id: str, question: str, choice: str, alternatives: A
             (project_id, question, choice, _dumps(alternatives), rationale, author, now()),
         )
         did = int(cur.lastrowid)
-        _fts_index(conn, "decision", did, project_id, question, f"{choice}. {rationale}")
+        _remember(project_id, "decision", did, question, f"{choice}. {rationale}", author)
         conn.commit()
         return did
 
@@ -381,7 +407,7 @@ def add_note(project_id: str, tag: str, body: str, author: str) -> int:
             (project_id, tag, body, author, now()),
         )
         nid = int(cur.lastrowid)
-        _fts_index(conn, "note", nid, project_id, tag, body)
+        _remember(project_id, "note", nid, tag, body, author)
         conn.commit()
         return nid
 
@@ -460,19 +486,69 @@ def list_runs(project_id: str, kind: str = "", limit: int = 25) -> list[dict[str
 # --------------------------------------------------------------------------- #
 
 def search(project_id: str, query: str, limit: int = 15) -> list[dict[str, Any]]:
+    """Semantic recall via mem0, with a keyword fallback.
+
+    The fallback scans the same rows this module already stores, so search keeps
+    working when LM Studio is not up — degraded to exact matching, never absent.
+    """
+    from . import semantic
+
+    hits = semantic.recall(project_id, query, limit)
+    if hits is not None:
+        return [{"kind": h["kind"], "title": (h["metadata"] or {}).get("title", ""),
+                 "snip": h["text"][:220], "score": h["score"], "backend": "mem0"}
+                for h in hits]
+
+    return _keyword_search(project_id, query, limit)
+
+
+#: Words carried by almost every question, so matching on them ranks everything
+#: equally and tells the caller nothing.
+_STOPWORDS = frozenset(
+    "a an and are as at be by did do does for from had has have how i in is it of on or "
+    "should that the there they this to was we were what when where which who why with "
+    "you your".split()
+)
+
+
+def _keyword_search(project_id: str, query: str, limit: int) -> list[dict[str, Any]]:
+    """Rank free-text rows by how many query words they contain.
+
+    The previous fallback matched the whole query as one LIKE pattern, so
+    "why was a sample excluded?" found nothing even when a note said exactly
+    that in other words. Since the default backend is now SQLite rather than
+    mem0, this path is what most installs actually use, and it has to work.
+
+    Scoring is deliberately plain — distinct words matched, over words asked —
+    because a project holds tens of these rows, not thousands.
+    """
+    import re
+
+    words = {w for w in re.findall(r"[a-z0-9]{3,}", query.lower()) if w not in _STOPWORDS}
     conn = connect(project_id)
-    try:
-        rows = conn.execute(
-            "SELECT kind, ref_id, title, snippet(memory_fts, 4, '[', ']', '…', 18) AS snip "
-            "FROM memory_fts WHERE memory_fts MATCH ? LIMIT ?",
-            (query, limit),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        # Bare user input can be an invalid FTS5 expression; fall back to a phrase query.
-        safe = '"' + query.replace('"', " ") + '"'
-        rows = conn.execute(
-            "SELECT kind, ref_id, title, snippet(memory_fts, 4, '[', ']', '…', 18) AS snip "
-            "FROM memory_fts WHERE memory_fts MATCH ? LIMIT ?",
-            (safe, limit),
-        ).fetchall()
-    return [dict(r) for r in rows]
+    sources = (
+        ("annotation", "SELECT obs_key||':'||cluster||' -> '||label AS t, "
+                       "COALESCE(rationale,'') AS b FROM annotation"),
+        ("decision", "SELECT question AS t, choice||'. '||COALESCE(rationale,'') AS b "
+                     "FROM decision"),
+        ("note", "SELECT tag AS t, body AS b FROM note"),
+        ("parameter", "SELECT name AS t, COALESCE(rationale,'') AS b FROM parameter"),
+    )
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for kind, sql in sources:
+        for r in conn.execute(sql).fetchall():
+            title, body = r["t"] or "", r["b"] or ""
+            hay = f"{title} {body}".lower()
+            if words:
+                hit = {w for w in words if w in hay}
+                if not hit:
+                    continue
+                score = round(len(hit) / len(words), 3)
+            elif query.lower().strip() not in hay:
+                continue  # no usable words: fall back to a plain containment test
+            else:
+                score = 1.0
+            scored.append((score, {"kind": kind, "title": title, "snip": body[:220],
+                                   "score": score, "backend": "keyword"}))
+    scored.sort(key=lambda s: -s[0])
+    return [h for _, h in scored[:limit]]

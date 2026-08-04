@@ -102,15 +102,23 @@ def umap(dataset_id: str, min_dist: float = 0.5, spread: float = 1.0, n_componen
 
 
 @tool("skin.cluster.leiden", category="cluster", summary="Leiden clustering.")
-def leiden(dataset_id: str, resolution: float = 0.8, key_added: str = "", flavor: str = "igraph",
+def leiden(dataset_id: str, resolution: float = 0.5, key_added: str = "", flavor: str = "igraph",
            n_iterations: int = 2, directed: bool = False, label: str = "", project_id: str = "",
            dry_run: bool = False, seed: int = 0, *, ctx: Ctx) -> None:
     """Cluster the neighbour graph. Key defaults to `leiden_res{resolution}`.
 
+    START LOW AND RAISE. Splitting a population that is really one state produces
+    clusters that differ only by activation or stress genes, and no marker panel
+    will separate them; merging back afterwards is guesswork. If the user asked
+    for "3-4 major types", 0.3-0.5 is the place to begin, not 0.8.
+
     Args:
         dataset_id: Handle or label with a neighbour graph.
-        resolution: Higher = more clusters. 0.8 is a reasonable first pass on
-            whole skin; use 1.0-1.6 when subclustering a single compartment.
+        resolution: Higher = more clusters. Start at 0.3-0.5 and raise only if
+            distinct populations are visibly merged. Continuous or plastic
+            compartments (neutrophil activation states, macrophage polarisation)
+            need lower values than discrete ones; skin.cluster.leiden_sweep
+            compares several resolutions before you commit.
         key_added: obs column name. Defaults to "leiden_res{resolution}".
         flavor: "igraph" (fast, recommended) or "leidenalg" (legacy).
         n_iterations: Leiden iterations. 2 with the igraph flavor.
@@ -160,6 +168,15 @@ def leiden(dataset_id: str, resolution: float = 0.8, key_added: str = "", flavor
         ctx.warn(f"{len(tiny)} clusters have fewer than 20 cells ({list(tiny.index)[:8]}). "
                  f"They are unlikely to survive marker ranking or pseudobulk DE; consider a "
                  f"lower resolution.")
+    # The tiny-cluster check above misses the common case: many clusters that are
+    # all comfortably large. 20k neutrophils at 0.8 gave 14 clusters, several of
+    # them the same activation state split in two, and nothing said so.
+    if vc.size > 10:
+        lower = round(max(0.1, resolution * 0.5), 2)
+        ctx.warn(f"{vc.size} clusters at resolution={resolution:g}. If you are after a "
+                 f"handful of major types, this is over-split — re-run at "
+                 f"resolution={lower:g} rather than merging afterwards. "
+                 f"skin.cluster.leiden_sweep compares resolutions directly.")
 
     dsid = registry.mint(ctx.project_id, adata, parent_id=parent, op="cluster.leiden",
                          params={"resolution": resolution, "key_added": key, "flavor": fl,

@@ -12,8 +12,10 @@ stream on stdio; `tests/test_no_stdout.py` and ruff's T20 rule both guard this.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -226,12 +228,30 @@ def _register_prompt(mcp: Any, path: Path) -> None:
 # CLI
 # --------------------------------------------------------------------------- #
 
-def _configure_logging(level: str) -> None:
-    """stderr only. Never stdout: it is the JSON-RPC channel on stdio."""
+def _configure_logging(level: str, log_dir: Path | None = None) -> None:
+    """stderr plus a file. Never stdout: it is the JSON-RPC channel on stdio.
+
+    The file matters because the usual host is LM Studio, which swallows a
+    server's stderr. Without it, "the session lost connection to the MCP server"
+    is all anyone can report, and a crash leaves nothing behind to read.
+    """
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     handler = logging.StreamHandler(stream=sys.stderr)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    handler.setFormatter(fmt)
     root = logging.getLogger()
     root.handlers[:] = [handler]
+    if log_dir is not None:
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            fh = RotatingFileHandler(log_dir / "server.log", maxBytes=2_000_000,
+                                     backupCount=3, encoding="utf-8")
+            fh.setFormatter(fmt)
+            root.addHandler(fh)
+            # A hard kill (OOM, segfault) never reaches a Python handler; the
+            # faulthandler dump is the only trace it leaves.
+            faulthandler.enable(file=open(log_dir / "crash.log", "a"))  # noqa: SIM115
+        except OSError as e:
+            logger.warning("could not open the log directory %s: %s", log_dir, e)
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
     # scanpy and matplotlib are chatty and some of it goes to stdout.
     for noisy in ("matplotlib", "numba", "h5py", "PIL"):
@@ -247,30 +267,58 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=8931)
     ap.add_argument("--project-root", default=None,
                     help="where projects live (default ~/.skinmcp)")
-    ap.add_argument("--profile", choices=["core", "full"], default="full",
-                    help="'core' exposes ~30 tools for small local models")
+    ap.add_argument("--profile", choices=["core", "full"], default=None,
+                    help="'core' (default) hides specialist namespaces to keep the "
+                         "tool list short; 'full' exposes all 124. Also SKINMCP_PROFILE.")
     ap.add_argument("--offline", action="store_true",
                     help="disable every network call; use shipped snapshots")
     ap.add_argument("--allow-raw-exec", action="store_true",
                     help="enable skin.runtime.exec_r_raw (arbitrary R). Off by default.")
-    ap.add_argument("--cache-objects", type=int, default=3)
-    ap.add_argument("--cache-gb", type=float, default=16.0)
+    ap.add_argument("--data-dir", action="append", default=[],
+                    help="directory to search when a bare filename is given. Repeatable.")
+    ap.add_argument("--cache-objects", type=int, default=None)
+    ap.add_argument("--cache-gb", type=float, default=None,
+                    help="in-memory AnnData cache cap (default: a fifth of RAM)")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args(argv)
 
-    _configure_logging(args.log_level)
-
+    # project_root first: the log file lives under it, and a crash before this
+    # point is the one case we genuinely cannot record.
     if args.project_root:
         CONFIG.project_root = Path(args.project_root).expanduser()
     CONFIG.project_root.mkdir(parents=True, exist_ok=True)
+    _configure_logging(args.log_level, CONFIG.project_root / "logs")
     CONFIG.offline = bool(args.offline)
     CONFIG.allow_raw_exec = bool(args.allow_raw_exec)
-    CONFIG.cache_max_objects = args.cache_objects
-    CONFIG.cache_max_gb = args.cache_gb
-    CONFIG.profile = args.profile  # type: ignore[assignment]
+    for d in args.data_dir:
+        dp = Path(d).expanduser().resolve()
+        if not dp.is_dir():
+            logger.error("--data-dir %s is not a directory", dp)
+            return 2
+        CONFIG.data_dirs.append(dp)
+    if args.cache_objects is not None:
+        CONFIG.cache_max_objects = args.cache_objects
+    if args.cache_gb is not None:
+        CONFIG.cache_max_gb = args.cache_gb
+    if args.profile:  # otherwise keep the env-aware default from Config
+        CONFIG.profile = args.profile  # type: ignore[assignment]
 
-    logger.info("project_root=%s profile=%s offline=%s", CONFIG.project_root,
-                CONFIG.profile, CONFIG.offline)
+    logger.info("project_root=%s profile=%s offline=%s data_dirs=%s",
+                CONFIG.project_root, CONFIG.profile, CONFIG.offline,
+                [str(d) for d in CONFIG.data_dirs])
+    # Recorded because the most likely way this process dies is the OS killing
+    # it for memory, which leaves no Python traceback at all. If server.log ends
+    # abruptly after a load, compare that load's size against these numbers.
+    from .config import available_ram_gb, total_ram_gb
+
+    avail = available_ram_gb()
+    logger.info("memory: %.1f GB total, %s free; AnnData cache capped at %.1f GB / %d objects",
+                total_ram_gb(), f"{avail:.1f} GB" if avail else "unknown",
+                CONFIG.cache_max_gb, CONFIG.cache_max_objects)
+    if avail and avail < 4.0:
+        logger.warning("only %.1f GB of RAM is free — a large .h5ad may not fit. If the "
+                       "connection drops mid-analysis, free memory (e.g. unload the local "
+                       "model) or lower --cache-gb.", avail)
 
     mcp = build_server()
     transport = "streamable-http" if args.transport == "http" else args.transport

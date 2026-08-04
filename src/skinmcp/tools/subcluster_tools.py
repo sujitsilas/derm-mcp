@@ -110,7 +110,7 @@ def extract(dataset_id: str, label_key: str, labels: list[str], new_label: str =
 
 @tool("skin.sub.pipeline", category="sub",
       summary="extract -> preprocess -> harmony -> neighbors -> umap -> leiden -> markers, one call.")
-def pipeline(dataset_id: str, label_key: str, labels: list[str], resolution: float = 1.0,
+def pipeline(dataset_id: str, label_key: str, labels: list[str], resolution: float = 0.5,
              batch_key: str = "Sample", n_hvg: int = 2000, n_comps: int = 30,
              n_neighbors: int = 15, exclude_gene_groups: list[str] | None = None,
              skip_harmony: bool = False, new_label: str = "", project_id: str = "",
@@ -121,8 +121,10 @@ def pipeline(dataset_id: str, label_key: str, labels: list[str], resolution: flo
         dataset_id: Handle or label.
         label_key: obs column holding the labels.
         labels: Labels to subcluster.
-        resolution: Leiden resolution. Higher than the whole-object pass —
-            1.0-1.6 is typical for a single compartment.
+        resolution: Leiden resolution. Start low (0.3-0.5) and raise only if
+            distinct populations are visibly merged: within one compartment most
+            of the variance is activation state, and a high value splits a single
+            state into several clusters that no marker panel can separate.
         batch_key: Batch key for the Harmony step.
         n_hvg: HVGs to select within the compartment.
         n_comps: PCA components.
@@ -276,7 +278,7 @@ def drop_clusters(dataset_id: str, cluster_key: str, clusters: list[str], reason
 
 @tool("skin.sub.recluster", category="sub",
       summary="Re-run preprocess -> harmony -> neighbors -> umap -> leiden after dropping cells.")
-def recluster(dataset_id: str, resolution: float = 1.0, batch_key: str = "Sample",
+def recluster(dataset_id: str, resolution: float = 0.5, batch_key: str = "Sample",
               n_hvg: int = 2000, n_comps: int = 30, exclude_gene_groups: list[str] | None = None,
               new_label: str = "", project_id: str = "", dry_run: bool = False,
               seed: int = 0, *, ctx: Ctx) -> None:
@@ -284,7 +286,8 @@ def recluster(dataset_id: str, resolution: float = 1.0, batch_key: str = "Sample
 
     Args:
         dataset_id: Handle or label.
-        resolution: Leiden resolution.
+        resolution: Leiden resolution. Start low (0.3-0.5); raise only if
+            distinct populations are merged.
         batch_key: Batch key for Harmony.
         n_hvg: HVGs to select.
         n_comps: PCA components.

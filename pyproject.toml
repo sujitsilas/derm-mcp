@@ -42,6 +42,10 @@ dependencies = [
     "seaborn>=0.13",
     "adjustText>=1.1",
     # --- misc ---
+    # psutil: free-RAM check that sizes the AnnData cache. Optional at runtime
+    # (config falls back to a share of total RAM) but the fallback cannot see
+    # that a local LLM already holds most of the machine.
+    "psutil>=5.9",
     "pyyaml>=6.0",
     "networkx>=3.2",
     "nbformat>=5.9",
@@ -64,6 +68,13 @@ full = [
     "bbknn>=1.6",
     "scvi-tools>=1.1",
 ]
+# Semantic recall over free-text notes, via mem0 against a local LM Studio (no
+# API key, nothing leaves the machine). Opt-in: `pip install -e .[memory]` and
+# SKINMCP_MEMORY_BACKEND=auto. Without it, recall falls back to a substring scan
+# over the same SQLite rows, which is adequate at the few-dozen-notes scale most
+# projects reach. mem0ai pulls its own backends (qdrant, openai, ...), so listing
+# them here as well would only invite version drift.
+memory = ["mem0ai>=2.0.15"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

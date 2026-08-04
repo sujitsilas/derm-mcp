@@ -33,16 +33,42 @@ def mcp():
 
 
 def test_tools_list_over_protocol(mcp):
+    """The default profile must carry a whole analysis end to end.
+
+    Counting tools is the wrong assertion — the default is `core` precisely to
+    keep the list short enough that a local model still picks correctly. What
+    matters is that nothing on the load -> QC -> cluster -> annotate -> DE ->
+    plot path is gated away.
+    """
     tools = asyncio.run(mcp.list_tools())
-    assert len(tools) >= 100
     names = {t.name for t in tools}
-    for expected in ("skin.memory.open_project", "skin.qc.sample_stats",
-                     "skin.de.pseudobulk", "skin.plot.volcano_grid",
+    for expected in ("skin.memory.open_project", "skin.io.load_h5ad",
+                     "skin.qc.sample_stats", "skin.cluster.leiden",
+                     "skin.sub.extract", "skin.de.pseudobulk",
+                     "skin.plot.volcano_grid", "skin.plot.umap",
                      "skin.help.workflow"):
-        assert expected in names
+        assert expected in names, f"{expected} is missing from the default profile"
     for t in tools:
         assert t.description, f"{t.name} has no description"
         assert t.input_schema.get("type") == "object"
+
+
+def test_full_profile_is_a_superset():
+    """`full` adds the specialist namespaces without changing the core ones."""
+    from skinmcp.config import CONFIG
+
+    core = {t.name for t in asyncio.run(build_server().list_tools())}
+    old = CONFIG.profile
+    try:
+        CONFIG.profile = "full"
+        full = {t.name for t in asyncio.run(build_server().list_tools())}
+    finally:
+        CONFIG.profile = old
+    assert core < full, "full must expose strictly more than core"
+    assert {n.rsplit(".", 1)[0] for n in full - core} <= {
+        "skin.ccc", "skin.traj", "skin.atlas", "skin.runtime", "skin.abundance",
+        "skin.export", "skin.report", "skin.bench",
+    }, sorted(full - core)
 
 
 def test_prompts_list_and_get(mcp):

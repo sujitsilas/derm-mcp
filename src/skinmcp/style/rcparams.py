@@ -9,6 +9,7 @@ figures get assembled for print.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -115,9 +116,22 @@ def annot(profile: str = "") -> dict[str, Any]:
     return ANNOT.get(profile or CONFIG.style_profile, ANNOT["standard"])
 
 
+#: Serialises figure building. matplotlib's rcParams and pyplot figure registry
+#: are process-global, and the MCP SDK runs every sync tool in a worker thread,
+#: so two plotting calls at once would interleave their rc_context enter/exit —
+#: one restoring the defaults while the other is still drawing. The result is a
+#: figure with the wrong fonts and sizes, silently, with both tools reporting
+#: success. Reentrant because style() nests: panels.* applies its own profile
+#: inside a caller that already holds one.
+_PLOT_LOCK = threading.RLock()
+
+
 @contextmanager
 def style(profile: str = "", **overrides: Any) -> Iterator[dict[str, Any]]:
     """Apply a style profile for the duration of a figure.
+
+    Holds the process-wide plotting lock, so every figure is built start to
+    finish without another thread changing rcParams underneath it.
 
     Also forces the Agg backend: an MCP server has no display, and a stray
     interactive backend will block a tool call forever.
@@ -132,8 +146,18 @@ def style(profile: str = "", **overrides: Any) -> Iterator[dict[str, Any]]:
     prof = profile or CONFIG.style_profile
     params = _resolve_font(PROFILES.get(prof, PUB_STANDARD))
     params = {**params, **overrides}
-    with plt.rc_context(params):
-        yield annot(prof)
+    with _PLOT_LOCK, plt.rc_context(params):
+        # Only the figures this block opens are ours to clean up: style() nests,
+        # and closing everything would take out the caller's in-progress figure.
+        before = set(plt.get_fignums())
+        try:
+            yield annot(prof)
+        except BaseException:
+            # A tool that raises between subplots() and close() would otherwise
+            # leak the figure for the life of the process.
+            for num in set(plt.get_fignums()) - before:
+                plt.close(num)
+            raise
 
 
 def savefig(fig: Any, path: Any, *, dpi_png: int | None = None, hero: bool = False) -> dict[str, str]:

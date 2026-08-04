@@ -167,7 +167,7 @@ def preprocess(
         f"sc.pp.highly_variable_genes(adata, n_top_genes={n_hvg}, flavor={hvg_flavor!r})\n"
         + (f"sc.pp.regress_out(adata, {regress_out!r})\n" if regress_out else "")
         + f"sc.pp.scale(adata, max_value={scale_max})\n"
-        f"sc.tl.pca(adata, svd_solver='arpack', n_comps={n_comps}, use_highly_variable=True)\n"
+        f"sc.tl.pca(adata, svd_solver='arpack', n_comps={n_comps}, mask_var='highly_variable')\n"
     )
     if dry_run:
         ctx.summary = {"n_excluded_genes": len(excluded),
@@ -220,8 +220,9 @@ def preprocess(
     sc.pp.scale(adata, max_value=scale_max)
     registry.set_x_state(adata, "scaled")
     n_comps_eff = int(min(n_comps, max(2, min(adata.n_obs, n_hvg_found) - 1)))
-    sc.tl.pca(adata, svd_solver="arpack", n_comps=n_comps_eff, use_highly_variable=True,
-              random_state=seed)
+    # mask_var, not the deprecated use_highly_variable: scanpy will remove it.
+    sc.tl.pca(adata, svd_solver="arpack", n_comps=n_comps_eff,
+              mask_var="highly_variable", random_state=seed)
 
     dsid = registry.mint(
         ctx.project_id, adata, parent_id=parent, op="integrate.preprocess",
@@ -287,13 +288,25 @@ def harmony(dataset_id: str, batch_key: str = "Sample", basis: str = "X_pca",
 
         raise no_embedding(basis, list(adata.obsm.keys()))
 
-    bio = biological_key or next(
-        (c for c in ("Type", "Condition", "condition", "Treatment") if c in adata.obs.columns), "")
+    # When the caller does not name the biological variable, do NOT guess it from
+    # a list of expected column names — a condition column called "treatment_arm"
+    # would slip past and the guard would silently never fire. Check the batch key
+    # against every low-cardinality categorical and report the worst confounding.
+    from . import _introspect as I
+
+    cands = ([biological_key] if biological_key
+             else I.confounding_candidates(adata, batch_key))
+    checks = {c: confounding_check(adata.obs[batch_key], adata.obs[c])
+              for c in cands if c in adata.obs.columns}
+    bio = (max(checks, key=lambda c: (checks[c]["confounded"], checks[c]["cramers_v"]))
+           if checks else "")
     confound = None
-    if bio and bio in adata.obs.columns:
-        chk = confounding_check(adata.obs[batch_key], adata.obs[bio])
+    if bio:
+        chk = checks[bio]
         tab = pd.crosstab(adata.obs[batch_key].astype(str), adata.obs[bio].astype(str))
         confound = {"batch_key": batch_key, "biological_key": bio, **chk,
+                    "checked_columns": list(checks),
+                    "auto_selected": not biological_key,
                     "contingency": tab.to_dict()}
         if chk["confounded"]:
             thin = [k for k, v in chk["batches_per_bio_level"].items() if v < 2]

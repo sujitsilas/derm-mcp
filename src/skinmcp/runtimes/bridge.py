@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -42,31 +43,6 @@ def available_scripts() -> list[str]:
 # runtime detection
 # --------------------------------------------------------------------------- #
 
-def docker_available() -> tuple[bool, str]:
-    exe = shutil.which(CONFIG.docker_bin)
-    if not exe:
-        return False, f"{CONFIG.docker_bin} not on PATH"
-    try:
-        p = subprocess.run([exe, "info", "--format", "{{.ServerVersion}}"],
-                           capture_output=True, text=True, timeout=15)
-        if p.returncode != 0:
-            return False, (p.stderr or "docker daemon not responding").strip()[:200]
-        return True, p.stdout.strip()
-    except (subprocess.TimeoutExpired, OSError) as e:
-        return False, str(e)[:200]
-
-
-def image_present() -> tuple[bool, str]:
-    ok, _ = docker_available()
-    if not ok:
-        return False, ""
-    exe = shutil.which(CONFIG.docker_bin) or CONFIG.docker_bin
-    p = subprocess.run([exe, "images", "-q", CONFIG.r_image],
-                       capture_output=True, text=True, timeout=20)
-    digest = p.stdout.strip()
-    return bool(digest), digest
-
-
 def rscript_available() -> tuple[bool, str]:
     exe = shutil.which("Rscript")
     if not exe:
@@ -79,15 +55,11 @@ def rscript_available() -> tuple[bool, str]:
 
 
 def runtime_status() -> dict[str, Any]:
-    docker_ok, docker_ver = docker_available()
-    img_ok, img_id = image_present()
+    """R is a local install managed by renv. There is no container layer."""
     r_ok, r_ver = rscript_available()
-    backend = "docker" if (docker_ok and img_ok) else ("renv" if r_ok else "none")
     return {
-        "backend": backend,
-        "available": backend != "none",
-        "docker": {"available": docker_ok, "version": docker_ver,
-                   "image": CONFIG.r_image, "image_present": img_ok, "image_id": img_id},
+        "backend": "renv" if r_ok else "none",
+        "available": r_ok,
         "local_r": {"available": r_ok, "version": r_ver},
         "scripts": available_scripts(),
         "raw_exec_enabled": CONFIG.allow_raw_exec,
@@ -158,19 +130,23 @@ def _write_h5ad_for_r(adata: Any, path: Path) -> None:
     # zellkonverter chokes on raw/obsp; strip them for the round trip.
     a.raw = None
     a.obsp = {}
-    a.write_h5ad(path, compression="gzip")
+    # Uncompressed: this is a transient local handoff that R reads once and
+    # deletes. Compressing it costs seconds of the caller's time to save disk
+    # that is freed moments later, and rules out lzf, which rhdf5 cannot read.
+    a.write_h5ad(path, compression=None)
 
 
 # --------------------------------------------------------------------------- #
 # execution
 # --------------------------------------------------------------------------- #
 
-def _run(cmd: list[str], log_path: Path, timeout: int = 3600) -> tuple[int, str]:
+def _run(cmd: list[str], log_path: Path, timeout: int = 3600,
+         cwd: Path | None = None, env: dict | None = None) -> tuple[int, str]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as lf:
         try:
             p = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, timeout=timeout,
-                               text=True)
+                               text=True, cwd=str(cwd) if cwd else None, env=env)
             code = p.returncode
         except subprocess.TimeoutExpired:
             lf.write(f"\n[skin-mcp] TIMEOUT after {timeout}s\n")
@@ -207,8 +183,7 @@ def run_r_script(
     status = runtime_status()
     if not status["available"]:
         raise r_unavailable(
-            f"docker: {status['docker']['version'] or 'unavailable'}; "
-            f"Rscript: {status['local_r']['version'] or 'unavailable'}",
+            f"Rscript: {status['local_r']['version'] or 'not on PATH'}",
             python_fallback or "skin.runtime.status",
         )
 
@@ -232,17 +207,15 @@ def run_r_script(
         (work / "io_mode.txt").write_text("mtx" if use_mtx else "h5ad", encoding="utf-8")
 
     log_path = CONFIG.ensure_project_dirs(project_id) / "logs" / f"{script_id}.log"
-    if status["backend"] == "docker":
-        exe = shutil.which(CONFIG.docker_bin) or CONFIG.docker_bin
-        cmd = [exe, "run", "--rm",
-               "-v", f"{work}:/work",
-               "-v", f"{SCRIPT_DIR}:/scripts:ro",
-               "-w", "/work", CONFIG.r_image,
-               "Rscript", f"/scripts/{script_id}.R", "/work"]
-    else:
-        cmd = [shutil.which("Rscript") or "Rscript", str(script), str(work)]
-
-    code, tail = _run(cmd, log_path, timeout=timeout)
+    proj = CONFIG.project_dir(project_id)
+    # Run with the project's renv library on the path, so the script sees the
+    # versions that project pinned rather than whatever is in the user library.
+    env = dict(os.environ)
+    lib = CONFIG.project_renv(project_id) / "library"
+    if lib.is_dir():
+        env["R_LIBS_USER"] = str(lib)
+    cmd = [shutil.which("Rscript") or "Rscript", str(script), str(work)]
+    code, tail = _run(cmd, log_path, timeout=timeout, cwd=proj, env=env)
     result_p = work / "result.json"
     if code != 0 or not result_p.exists():
         raise RuntimeUnavailable(
@@ -291,15 +264,9 @@ def exec_r_raw(code: str, *, project_id: str, adata: Any | None = None,
     (work / "raw.R").write_text(code, encoding="utf-8")
     if adata is not None:
         _write_h5ad_for_r(adata, work / "input.h5ad")
-    status = runtime_status()
-    if not status["available"]:
-        raise r_unavailable("no R backend", "skin.runtime.status")
-    if status["backend"] == "docker":
-        exe = shutil.which(CONFIG.docker_bin) or CONFIG.docker_bin
-        cmd = [exe, "run", "--rm", "-v", f"{work}:/work", "-w", "/work",
-               CONFIG.r_image, "Rscript", "/work/raw.R"]
-    else:
-        cmd = [shutil.which("Rscript") or "Rscript", str(work / "raw.R")]
+    if not runtime_status()["available"]:
+        raise r_unavailable("Rscript not on PATH", "skin.runtime.status")
+    cmd = [shutil.which("Rscript") or "Rscript", str(work / "raw.R")]
     log_path = CONFIG.ensure_project_dirs(project_id) / "logs" / "exec_r_raw.log"
     code_, tail = _run(cmd, log_path, timeout=timeout)
     return {"exit_code": code_, "log": tail, "work_dir": str(work)}

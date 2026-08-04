@@ -49,10 +49,14 @@ def run_project(loaded):
     a.obs["cell_types"] = a.obs["true_celltype"].astype(str).astype("category")
     lab = registry.mint(pid, a, parent_id=c, op="test.label", params={}, label="final")
 
+    # Timepoint is passed explicitly: blocking is the caller's choice and there
+    # is no implicit default (see de_tools._blocking_factors). The reference
+    # recomputation below hardcodes the matching "~ Timepoint + Type" design, so
+    # this call and that design must be changed together.
     de = ok(de_tools.pseudobulk(dataset_id=lab, label_key="cell_types",
                                 condition_key="Type", contrast=["Burn", "Sham"],
                                 groups=["Macrophages"], exclude_gene_groups=[],
-                                project_id=pid), "de")
+                                covariates=["Timepoint"], project_id=pid), "de")
     return pid, lab, de["summary"]
 
 
@@ -61,7 +65,7 @@ def test_exported_notebook_executes_and_reproduces_de(run_project, tmp_path):
 
     pid, lab, de_summary = run_project
     row = de_summary["per_label"][0]
-    server_df = pd.read_csv(row["table_path"]).set_index("gene")
+    server_df = pd.read_csv(de_summary["tables"][row["label"]]).set_index("gene")
 
     nb_res = ok(export_tools.notebook(fmt="ipynb", project_id=pid), "notebook")
     nb_path = Path(nb_res["summary"]["files"][0])
@@ -103,7 +107,7 @@ def test_exported_notebook_executes_and_reproduces_de(run_project, tmp_path):
     assert "counts" in adata.layers
 
     # the notebook must not have clobbered the server's own artifact
-    assert list(pd.read_csv(row["table_path"]).columns) == list(
+    assert list(pd.read_csv(de_summary["tables"][row["label"]]).columns) == list(
         server_df.reset_index().columns), "the notebook overwrote a server table"
 
     import numpy as np
@@ -128,7 +132,7 @@ def test_exported_notebook_executes_and_reproduces_de(run_project, tmp_path):
                        for s in idx]}, index=idx)
     meta["Type"] = pd.Categorical(meta["Type"], categories=["Sham", "Burn"])
     meta["Timepoint"] = meta["Timepoint"].astype("category")
-    counts = counts.loc[:, counts.sum(0) >= 10]
+    counts = counts.loc[:, counts.sum(axis=0) >= 10]
 
     dds = DeseqDataSet(counts=counts.astype(int), metadata=meta,
                        design="~ Timepoint + Type", quiet=True)

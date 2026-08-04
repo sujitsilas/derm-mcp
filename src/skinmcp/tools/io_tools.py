@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from .. import registry
+from ..config import CONFIG
 from ..errors import BadParam, NotFound, OrganismMismatch
 from ..knowledge import _check_organism, infer_organism_from_genes
 from ..memory import store
-from ..returns import cat_summary, top_n
 from ._base import Ctx, tool
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,10 @@ def validate_ingest(adata: Any, organism: str, ctx: Ctx, *, source: str,
     u = registry.skinmcp_uns(adata)
     u["source"] = source
 
+    # Remember where this came from so a later bare filename resolves.
+    if Path(source).exists():
+        CONFIG.register_data_dir(Path(source))
+
 
 def _xmax(adata: Any) -> float:
     import numpy as np
@@ -120,18 +124,26 @@ def _xmax(adata: Any) -> float:
 
 
 def _describe_payload(adata: Any, dataset_id: str, row: dict[str, Any] | None) -> dict[str, Any]:
-    import pandas as pd
+    """Compact object description that fits the 4 KB return budget.
 
-    obs_cols: dict[str, Any] = {}
-    for c in adata.obs.columns:
-        s = adata.obs[c]
-        if isinstance(s.dtype, pd.CategoricalDtype) or s.dtype == object:
-            info = cat_summary(s, max_levels=20)
-            obs_cols[c] = {"dtype": "categorical", **info}
-        else:
-            obs_cols[c] = {"dtype": str(s.dtype), "min": float(s.min()) if len(s) else None,
-                           "median": float(s.median()) if len(s) else None,
-                           "max": float(s.max()) if len(s) else None}
+    A real object has 30-40 obs columns. Emitting full value counts for each
+    blows the budget, the whole summary spills to a resource, and the caller —
+    which typically calls describe FIRST — gets nothing it can act on. So obs is
+    a one-line type map for every column, plus the levels of the few columns
+    that actually drive a design. The complete schema stays available at
+    skin://dataset/{id}/obs_schema.
+    """
+
+    from . import _introspect as I
+
+    types = {str(c): (f"cat[{adata.obs[c].astype(str).nunique()}]"
+                      if I.is_categorical(adata.obs[c]) else str(adata.obs[c].dtype))
+             for c in adata.obs.columns}
+    cats = I.categoricals(adata)
+    ranked = I.groupable(adata)
+    levels = {c: cats[c][:15] for c in ranked[:8]}
+    constant = I.constant_columns(adata)
+
     return {
         "dataset_id": dataset_id,
         "label": (row or {}).get("label") or "",
@@ -139,12 +151,18 @@ def _describe_payload(adata: Any, dataset_id: str, row: dict[str, Any] | None) -
         "n_vars": int(adata.n_vars),
         "organism": registry.get_organism(adata),
         "x_state": registry.get_x_state(adata),
-        "layers": list(adata.layers.keys()),
-        "obsm": list(adata.obsm.keys()),
-        "obsp": list(adata.obsp.keys()),
-        "uns_keys": sorted(adata.uns.keys())[:30],
-        "var_columns": list(adata.var.columns)[:20],
-        "obs": top_n(obs_cols, 30),
+        # zellkonverter/Seurat exports can yield a stray None key here; drop it
+        # rather than report a layer the caller cannot address.
+        "layers": [str(k) for k in adata.layers.keys() if k is not None],
+        "obsm": [str(k) for k in adata.obsm.keys() if k is not None],
+        "uns_keys": sorted(map(str, adata.uns.keys()))[:12],
+        "var_columns": list(adata.var.columns)[:10],
+        "obs_types": types,
+        "obs_levels": levels,
+        "groupable_columns": ranked,
+        "constant_columns": constant,
+        "n_obs_columns": int(len(types)),
+        "full_obs_schema": f"skin://dataset/{dataset_id}/obs_schema",
         "parent_id": (row or {}).get("parent_id"),
         "op": (row or {}).get("op"),
     }
@@ -175,7 +193,8 @@ def load_10x(path: str, sample_name: str, organism: str = "mouse",
     """
     import scanpy as sc
 
-    p = Path(path).expanduser()
+    p = CONFIG.resolve_input(path)
+    ctx.adopt_output_dir(p)
     if chemistry not in CHEMISTRIES:
         raise BadParam(f"unknown chemistry {chemistry!r}", remedy=f"One of {list(CHEMISTRIES)}")
     if not p.exists():
@@ -197,7 +216,7 @@ def load_10x(path: str, sample_name: str, organism: str = "mouse",
     validate_ingest(adata, organism, ctx, source=str(p))
     registry.skinmcp_uns(adata)["chemistry"] = chemistry
 
-    dsid = registry.mint(ctx.project_id, adata, parent_id=None, op="load_10x",
+    dsid = ctx.mint(adata, parent_id=None, op="load_10x",
                          params={"path": str(p), "sample": sample_name,
                                  "organism": organism, "chemistry": chemistry},
                          label=label)
@@ -227,7 +246,8 @@ def load_h5ad(path: str, organism: str = "mouse", counts_layer: str = "counts",
     """
     import anndata as ad
 
-    p = Path(path).expanduser()
+    p = CONFIG.resolve_input(path)
+    ctx.adopt_output_dir(p)
     if not p.exists():
         raise NotFound(f"{p} does not exist")
     ctx.code = f"import anndata as ad\nadata = ad.read_h5ad({str(p)!r})\n"
@@ -242,7 +262,7 @@ def load_h5ad(path: str, organism: str = "mouse", counts_layer: str = "counts",
     validate_ingest(adata, organism, ctx, source=str(p),
                     expect_raw="counts" not in adata.layers)
 
-    dsid = registry.mint(ctx.project_id, adata, parent_id=None, op="load_h5ad",
+    dsid = ctx.mint(adata, parent_id=None, op="load_h5ad",
                          params={"path": str(p), "organism": organism},
                          label=label, allow_no_counts=allow_no_counts)
     ctx.dataset_id = dsid
@@ -270,7 +290,8 @@ def load_mtx_export(directory: str, organism: str = "mouse", label: str = "",
     """
     from ..runtimes.bridge import read_mtx_export
 
-    d = Path(directory).expanduser()
+    d = CONFIG.resolve_input(directory)
+    ctx.adopt_output_dir(d)
     if not d.is_dir():
         raise NotFound(f"{d} is not a directory")
     missing = [f for f in ("matrix.mtx", "genes.txt", "barcodes.txt") if not (d / f).exists()]
@@ -286,11 +307,171 @@ def load_mtx_export(directory: str, organism: str = "mouse", label: str = "",
 
     adata = read_mtx_export(d)
     validate_ingest(adata, organism, ctx, source=str(d))
-    dsid = registry.mint(ctx.project_id, adata, parent_id=None, op="load_mtx_export",
+    dsid = ctx.mint(adata, parent_id=None, op="load_mtx_export",
                          params={"dir": str(d), "organism": organism}, label=label)
     ctx.dataset_id = dsid
     ctx.summary = _describe_payload(adata, dsid, None)
     ctx.suggest("skin.io.describe", "skin.qc.sample_stats")
+
+
+def _align_barcodes(target: Any, source: Any) -> tuple[Any, str]:
+    """Match `source` cells onto `target` cells, tolerating the usual suffix drift.
+
+    Barcodes routinely disagree between a processed object and the raw matrix it
+    came from: `AAACCT-1` vs `AAACCT`, or `sample1_AAACCT-1` after a merge. Try
+    the obvious normalisations in order and report which one worked, rather than
+    failing on an exact-match test the user cannot see the result of.
+    """
+    import pandas as pd
+
+    def strip_suffix(x: Any) -> Any:
+        return pd.Index([str(b).rsplit("-", 1)[0] for b in x])
+
+    def strip_prefix(x: Any) -> Any:
+        return pd.Index([str(b).split("_", 1)[-1] for b in x])
+
+    strategies = [
+        ("exact", lambda i: i),
+        ("ignoring the -1 suffix", strip_suffix),
+        ("ignoring the sample prefix", strip_prefix),
+        ("ignoring both prefix and suffix", lambda i: strip_suffix(strip_prefix(i))),
+    ]
+    best, best_n, best_how = None, 0, ""
+    for how, fn in strategies:
+        s_idx, t_idx = fn(source.obs_names), fn(target.obs_names)
+        if not s_idx.is_unique or not t_idx.is_unique:
+            continue
+        n = len(t_idx.intersection(s_idx))
+        if n > best_n:
+            best, best_n, best_how = (s_idx, t_idx), n, how
+        if n == target.n_obs:
+            break
+    if best is None or best_n == 0:
+        return None, None, "no barcode overlap under any normalisation"
+    s_idx, t_idx = best
+    src = source.copy()
+    src.obs_names = s_idx
+    have = set(s_idx)
+    # Positions in `target`, and the source rows in that same order, so the
+    # caller can assign one into the other without re-deriving the mapping.
+    rows = [i for i, b in enumerate(t_idx) if b in have]
+    keep = [t_idx[i] for i in rows]
+    return src[keep], rows, f"{best_n}/{target.n_obs} cells matched {best_how}"
+
+
+@tool("skin.io.attach_counts", category="io",
+      summary="Attach raw counts from a separate matrix to a counts-free handle.")
+def attach_counts(dataset_id: str, path: str, counts_layer: str = "",
+                  label: str = "", project_id: str = "", dry_run: bool = False,
+                  seed: int = 0, *, ctx: Ctx) -> None:
+    """Add `layers['counts']` to an object that arrived without them.
+
+    Processed objects are often shared log-normalised with the raw matrix
+    stripped, which blocks pseudobulk DE, subclustering and re-normalisation.
+    If the user still has the raw counts — the CellRanger `.h5`/mtx directory,
+    or an earlier `.h5ad` — this grafts them on by barcode.
+
+    Cells are matched on barcode (tolerating `-1` suffixes and `sample_` prefixes)
+    and genes on `var_names`. Counts must be integers; anything else is rejected,
+    because silently treating normalised values as counts is how a DE result ends
+    up wrong rather than absent.
+
+    Args:
+        dataset_id: The counts-free handle.
+        path: Raw counts source — .h5ad, CellRanger .h5, or a 10x/mtx directory.
+        counts_layer: Which layer of the source holds counts. Default: its X.
+        label: Optional alias for the new handle.
+        project_id: Defaults to the active project.
+        dry_run: Report the overlap without writing a new handle.
+        seed: RNG seed.
+    """
+    import numpy as np
+    import scipy.sparse as sp
+
+    adata = registry.load(ctx.project_id, dataset_id, copy=True)
+    if "counts" in adata.layers:
+        ctx.warn("this handle already has layers['counts']; it will be replaced.")
+    p = CONFIG.resolve_input(path)
+    if not p.exists():
+        raise NotFound(f"{p} does not exist",
+                       remedy="Ask the user where the raw counts live: the CellRanger "
+                              "filtered_feature_bc_matrix .h5/directory, or the .h5ad "
+                              "this object was derived from.")
+
+    src = _read_counts_source(p)
+    if counts_layer:
+        if counts_layer not in src.layers:
+            raise NotFound(f"{p} has no layer {counts_layer!r}",
+                           remedy=f"Layers present: {list(src.layers)}")
+        src.X = src.layers[counts_layer]
+
+    aligned, rows, how = _align_barcodes(adata, src)
+    if aligned is None:
+        raise BadParam(
+            f"cells in {p.name} do not match this dataset ({how})",
+            remedy=("Check this is the raw matrix for THIS object. Sample-merged "
+                    "objects usually need the per-sample matrices instead — load "
+                    "those with skin.io.build_multisample."),
+            details={"dataset_barcodes": list(map(str, adata.obs_names[:3])),
+                     "source_barcodes": list(map(str, src.obs_names[:3]))},
+        )
+
+    genes = [g for g in adata.var_names if g in set(aligned.var_names)]
+    if len(genes) < 0.5 * adata.n_vars:
+        raise BadParam(
+            f"only {len(genes)}/{adata.n_vars} genes are present in {p.name}",
+            remedy="The raw matrix must cover the genes in this object. A different "
+                   "reference build or a symbol/Ensembl mismatch would look like this.",
+        )
+
+    x = aligned[:, genes].X
+    sample = (x[:20].toarray() if sp.issparse(x) else np.asarray(x[:20]))
+    if sample.size and not np.allclose(sample, np.round(sample)):
+        raise BadParam(
+            f"{p.name} does not hold integer counts",
+            remedy="This looks normalised too. Point at the raw matrix — counts must "
+                   "be integers for pseudobulk DE to be valid.",
+        )
+
+    ctx.summary = {"matched": how, "genes_matched": len(genes), "source": str(p)}
+    if dry_run:
+        return
+
+    gpos = {g: i for i, g in enumerate(adata.var_names)}
+    cols = [gpos[g] for g in genes]
+    block = x.toarray() if sp.issparse(x) else np.asarray(x)
+    full = np.zeros(adata.shape, dtype="float32")
+    full[np.ix_(rows, cols)] = block
+    adata.layers["counts"] = sp.csr_matrix(full) if sp.issparse(x) else full
+
+    if len(rows) < adata.n_obs:
+        ctx.warn(f"{adata.n_obs - len(rows)} cells had no match and their counts are "
+                 f"zero; drop them before DE or the pseudobulk sums will be wrong.")
+
+    ctx.code = (f"import anndata as ad\n"
+                f"raw = ad.read_h5ad({str(p)!r})\n"
+                f"adata.layers['counts'] = raw[adata.obs_names, adata.var_names].X\n")
+    dsid = ctx.mint(adata, parent_id=dataset_id, op="attach_counts",
+                    params={"path": str(p), "matched": how}, label=label)
+    ctx.dataset_id = dsid
+    ctx.summary["dataset_id"] = dsid
+    ctx.suggest("skin.io.describe", "skin.de.pseudobulk", "skin.sub.extract")
+
+
+def _read_counts_source(p: Path) -> Any:
+    """Read a raw-counts source in whichever of the three usual shapes it is."""
+    import scanpy as sc
+
+    if p.is_dir():
+        return sc.read_10x_mtx(p)
+    if p.suffix == ".h5ad":
+        import anndata as ad
+
+        return ad.read_h5ad(p)
+    if p.suffix == ".h5":
+        return sc.read_10x_h5(p)
+    raise BadParam(f"cannot read counts from {p.name}",
+                   remedy="Expected a .h5ad, a CellRanger .h5, or a 10x/mtx directory.")
 
 
 @tool("skin.io.load_seurat_rds", category="io", needs_r=True,
@@ -311,7 +492,8 @@ def load_seurat_rds(path: str, organism: str = "mouse", assay: str = "RNA", labe
     """
     from ..runtimes.bridge import seurat_to_h5ad
 
-    p = Path(path).expanduser()
+    p = CONFIG.resolve_input(path)
+    ctx.adopt_output_dir(p)
     if not p.exists():
         raise NotFound(f"{p} does not exist")
     ctx.code = (f"# R bridge: Seurat -> SingleCellExperiment -> h5ad\n"
@@ -322,7 +504,7 @@ def load_seurat_rds(path: str, organism: str = "mouse", assay: str = "RNA", labe
 
     adata, log_tail = seurat_to_h5ad(p, assay=assay, project_id=ctx.project_id)
     validate_ingest(adata, organism, ctx, source=str(p))
-    dsid = registry.mint(ctx.project_id, adata, parent_id=None, op="load_seurat_rds",
+    dsid = ctx.mint(adata, parent_id=None, op="load_seurat_rds",
                          params={"path": str(p), "assay": assay, "organism": organism},
                          label=label)
     ctx.dataset_id = dsid
@@ -435,7 +617,7 @@ def build_multisample(
                  f"join='outer', so genes absent from a sample are zero-filled there. "
                  f"That is correct only if the samples share a reference — verify.")
 
-    dsid = registry.mint(ctx.project_id, adata, parent_id=None, op="build_multisample",
+    dsid = ctx.mint(adata, parent_id=None, op="build_multisample",
                          params={"inputs": inputs, "organism": organism,
                                  "chemistry": chemistry}, label=label)
     ctx.dataset_id = dsid
@@ -499,7 +681,7 @@ def set_label(dataset_id: str, label: str, project_id: str = "", dry_run: bool =
     """
     resolved = store.resolve_dataset_ref(ctx.project_id, dataset_id)
     if resolved is None:
-        raise NotFound(f"unknown handle {dataset_id!r}", suggested_tool="skin.io.lineage")
+        raise registry.bad_handle(ctx.project_id, dataset_id)
     if dry_run:
         ctx.summary = {"would_label": resolved, "as": label}
         return
@@ -520,14 +702,15 @@ def save_h5ad(dataset_id: str, path: str, project_id: str = "", dry_run: bool = 
         dry_run: Report the destination without writing.
         seed: Unused.
     """
-    p = Path(path).expanduser()
+    p = CONFIG.resolve_input(path)
     ctx.code = f"adata.write_h5ad({str(p)!r}, compression='gzip')\n"
     if dry_run:
         ctx.summary = {"would_write": str(p)}
         return
     adata = registry.load(ctx.project_id, dataset_id)
     p.parent.mkdir(parents=True, exist_ok=True)
-    registry._sanitize_for_h5ad(adata)
+    for note in registry._sanitize_for_h5ad(adata):
+        ctx.warn(note)
     adata.write_h5ad(p, compression="gzip")
     ctx.dataset_id = store.resolve_dataset_ref(ctx.project_id, dataset_id)
     ctx.add_artifact("h5ad", p, caption=f"export of {ctx.dataset_id}")

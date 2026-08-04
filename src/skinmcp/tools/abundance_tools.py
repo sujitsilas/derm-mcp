@@ -403,7 +403,7 @@ def proportions(dataset_id: str, label_key: str, sample_key: str = "Sample",
     keys = [sample_key, *gk]
     counts = (o.groupby(keys + [label_key], observed=True).size()
               .unstack(label_key, fill_value=0))
-    props = counts.div(counts.sum(1).replace(0, np.nan), axis=0).reset_index()
+    props = counts.div(counts.sum(axis=1).replace(0, np.nan), axis=0).reset_index()
     labels = [c for c in counts.columns]
 
     def tf(v: Any) -> Any:
@@ -445,7 +445,7 @@ def proportions(dataset_id: str, label_key: str, sample_key: str = "Sample",
             ctx.warn(f"{cond_key!r} has {len(arms)} levels; pairwise tests need exactly 2. "
                      f"Reporting proportions without a test.")
 
-    n_small = int((counts.sum(1) < 100).sum())
+    n_small = int((counts.sum(axis=1) < 100).sum())
     if n_small:
         ctx.warn(f"{n_small} samples contribute fewer than 100 cells; their proportions are "
                  f"noisy and dominate the SEM.")

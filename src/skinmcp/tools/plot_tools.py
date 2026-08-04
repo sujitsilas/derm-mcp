@@ -67,17 +67,21 @@ def set_style(profile: str = "standard", project_id: str = "", dry_run: bool = F
 
 
 @tool("skin.plot.umap", category="plot", summary="UMAP coloured by obs keys or genes.")
-def umap(dataset_id: str, color: list[str], save_prefix: str = "umap", ncols: int = 2,
+def umap(dataset_id: str, color: list[str], save_prefix: str = "", ncols: int = 2,
          point_size: float = 0.0, legend_loc: str = "right margin", cmap: str = "viridis",
-         group: str = "umap", return_image: bool = False, project_id: str = "",
-         dry_run: bool = False, seed: int = 0, *, ctx: Ctx) -> None:
+         group: str = "umap", split_by: str = "", return_image: bool = False,
+         project_id: str = "", dry_run: bool = False, seed: int = 0, *, ctx: Ctx) -> None:
     """Plot the UMAP, coloured by one or more obs columns or genes.
 
     Args:
         dataset_id: Handle or label with X_umap.
         color: obs columns and/or gene names.
-        save_prefix: Output filename stem.
+        save_prefix: Output filename stem. Default: derived from `color`, so two
+            different UMAPs do not overwrite each other.
         ncols: Panels per row.
+        split_by: Not supported here — faceting lives in skin.plot.umap_split.
+            Accepted only so that passing it is an error rather than a figure
+            that silently is not split.
         point_size: Point size. 0 = scanpy's automatic size.
         legend_loc: "right margin", "on data", or "none".
         cmap: Colormap for continuous colours.
@@ -89,6 +93,16 @@ def umap(dataset_id: str, color: list[str], save_prefix: str = "umap", ncols: in
     """
     import matplotlib.pyplot as plt
     import scanpy as sc
+
+    if split_by:
+        raise BadParam(
+            f"skin.plot.umap does not facet, so split_by={split_by!r} would have been "
+            f"ignored and the figure would not be split",
+            remedy=(f"Use skin.plot.umap_split(dataset_id=..., color_key={(color or [''])[0]!r}, "
+                    f"split_key={split_by!r}) — and second_split=... for a two-factor grid "
+                    f"such as condition x timepoint."),
+            suggested_tool="skin.plot.umap_split",
+        )
 
     adata = registry.load(ctx.project_id, dataset_id)
     ctx.dataset_id = store.resolve_dataset_ref(ctx.project_id, dataset_id)
@@ -125,7 +139,10 @@ def umap(dataset_id: str, color: list[str], save_prefix: str = "umap", ncols: in
         for ax in af[len(keys):]:
             ax.set_visible(False)
         fig.tight_layout()
-        paths = savefig(fig, ctx.figdir(group) / save_prefix)
+        # Derived from the colouring, so plotting two different UMAPs in one
+        # session does not leave only the last one on disk.
+        stem = save_prefix or "umap_" + "_".join(panels.slug(k) for k in keys[:3])
+        paths = savefig(fig, ctx.figdir(group) / stem)
         plt.close(fig)
 
     ctx.summary = {"color": keys, "n_panels": len(keys), "n_cells": int(adata.n_obs)}
@@ -826,7 +843,7 @@ def heatmap(dataset_id: str, genes: list[str], groupby: str, standard_scale: str
              else PAL.natural_order(M.index))
     M = M.reindex([o for o in order if o in M.index])
     if standard_scale == "var":
-        M = (M - M.mean(0)) / M.std(0).replace(0, 1)
+        M = (M - M.mean(axis=0)) / M.std(axis=0).replace(0, 1)
     elif standard_scale == "group":
         M = M.sub(M.mean(1), axis=0).div(M.std(1).replace(0, 1), axis=0)
 

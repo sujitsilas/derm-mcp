@@ -8,8 +8,10 @@ parameters it surfaces are offered, not applied (§5 guardrail).
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+from ..config import CONFIG
 from . import store
 
 
@@ -20,13 +22,45 @@ def _ds_line(d: dict[str, Any]) -> str:
             f"x={d.get('x_state', '?')} op={d.get('op', '?')}{parent}")
 
 
+def _artifact_lines(project_id: str, limit: int = 14) -> list[str]:
+    """Recent figures and tables as `kind path`, relative to `output_dir`.
+
+    Relative because the briefing has a 4 KB budget and absolute paths are ~80
+    bytes each: spelling them out truncated the list to five of fourteen, which
+    is exactly the information a resuming session needs in full.
+    """
+    root = Path(store.get_output_dir(project_id) or CONFIG.project_dir(project_id))
+    out = []
+    for a in store.list_artifacts(project_id, limit=limit):
+        p = Path(a.get("path") or "")
+        try:
+            rel = p.relative_to(root) if p.is_absolute() else p
+        except ValueError:
+            rel = p  # outside the output dir; keep it absolute
+        out.append(f"{a.get('kind', '?')} {rel}")
+    return out
+
+
 def open_flags(project_id: str, steps: list[dict[str, Any]]) -> list[str]:
-    """Warnings from recent steps that nothing has yet resolved."""
-    flags: list[str] = []
+    """Warnings from recent steps that nothing has yet resolved.
+
+    Collapsed by tool+error: one stuck loop used to emit eight identical
+    "set_label FAILED" lines and push everything the project had actually
+    achieved out of the briefing.
+    """
+    counts: dict[str, int] = {}
+    latest: dict[str, int] = {}
     for s in steps:
-        if not s.get("ok"):
-            flags.append(f"step {s['step_id']} {s['tool']} FAILED: {(s.get('error') or '')[:120]}")
-    return flags[-8:]
+        if s.get("ok"):
+            continue
+        key = f"{s['tool']}: {(s.get('error') or '')[:120]}"
+        counts[key] = counts.get(key, 0) + 1
+        latest[key] = s["step_id"]
+    out = []
+    for key, n in list(counts.items())[-6:]:
+        times = f" (x{n}, last step {latest[key]})" if n > 1 else f" (step {latest[key]})"
+        out.append(f"{key}{times}")
+    return out
 
 
 def workflow_state(project_id: str) -> dict[str, Any]:
@@ -81,7 +115,7 @@ def workflow_state(project_id: str) -> dict[str, Any]:
     return state
 
 
-def brief(project_id: str, max_steps: int = 10) -> dict[str, Any]:
+def brief(project_id: str, max_steps: int = 5) -> dict[str, Any]:
     proj = store.get_project(project_id) or {}
     datasets = store.list_datasets(project_id)
     steps = store.get_steps(project_id, limit=max_steps)
@@ -127,6 +161,21 @@ def brief(project_id: str, max_steps: int = 10) -> dict[str, Any]:
         ],
         "notes": [{"tag": n["tag"], "body": n["body"][:160]} for n in notes],
         "runs": runs,
+        # What already exists on disk. Without this a session resuming after a
+        # context compaction cannot tell finished work from work still to do,
+        # and re-runs the whole analysis: the handoff named the figures, but
+        # nothing said where they were or that they were already rendered.
+        "output_dir": store.get_output_dir(project_id) or str(
+            CONFIG.project_dir(project_id)),
+        "artifacts": _artifact_lines(project_id),
+        "n_artifacts": len(store.list_artifacts(project_id, limit=500)),
+        "resume_note": (
+            "artifact paths are relative to output_dir, newest first. These runs "
+            "and files ALREADY EXIST — do not recompute them. Re-render a figure "
+            "only if the user asked for a change, and reuse the listed run_id "
+            "rather than starting a new DE or enrichment run. If n_artifacts "
+            "exceeds the list shown, skin.memory.export has the full record."
+        ),
         "last_steps": [
             {"id": s["step_id"], "tool": s["tool"], "ok": bool(s["ok"]),
              "t": round(s["duration_s"], 2)}

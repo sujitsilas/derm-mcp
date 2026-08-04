@@ -8,11 +8,12 @@ directive: nothing recorded here changes server behaviour.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from ..config import CONFIG
 from ..errors import BadParam, NotFound
-from ..memory import recall, store
+from ..memory import recall, semantic, store
 from ._base import Ctx, get_active_project, set_active_project, tool
 
 
@@ -23,6 +24,7 @@ def open_project(
     organism: str = "mouse",
     description: str = "",
     design_notes: str = "",
+    output_dir: str = "",
     project_id: str = "",
     dry_run: bool = False,
     seed: int = 0,
@@ -40,6 +42,9 @@ def open_project(
         description: What the experiment is.
         design_notes: Conditions, timepoints, replicates. Free text; it ends up
             in the exported methods draft.
+        output_dir: Where figures/ and tables/ are written. Defaults to the
+            directory the data is loaded from, so results sit beside the .h5ad.
+            Set this when the user names somewhere else.
         project_id: Re-attach to an exact id instead of matching by name.
         dry_run: Validate only.
         seed: RNG seed recorded with the step.
@@ -63,13 +68,39 @@ def open_project(
         pid = store.create_project(name, org, description, design_notes, project_id or None)
         resumed = False
 
+    if output_dir:
+        store.set_output_dir(pid, str(Path(output_dir).expanduser().resolve()))
+
     set_active_project(pid)
     ctx.project_id = pid
     b = recall.brief(pid)
+
+    # State the runtime up front. Without this the caller cannot tell whether it
+    # must provision an environment before doing anything, and burns turns
+    # looking for one. The server's own interpreter already has every core
+    # dependency; a project-local runtime is only for pinned reproducibility.
+    from ..runtimes import bridge, python_manifest
+
+    pkgs = python_manifest.capture()
+    r = bridge.runtime_status()
+    runtime = {
+        "python": "ready (in-process)",
+        "scanpy": pkgs.get("scanpy"),
+        "r": "ready" if r["available"] else "not installed",
+        "note": ("No provisioning is needed to start — load data and analyse. "
+                 "skin.runtime.create(kind='python'|'r') builds a pinned per-project "
+                 "environment when you want the versions frozen for reproduction."),
+    }
+    if not r["available"]:
+        runtime["r_note"] = ("R tools (scDblFinder, DecontX, miloR, CellChat) will "
+                             "return RUNTIME_UNAVAILABLE naming a Python fallback.")
+
     ctx.summary = {
         "project_id": pid,
         "resumed": resumed,
         "root": str(CONFIG.project_dir(pid)),
+        "runtime": runtime,
+        "memory": semantic.status(pid)["backend"],
         "briefing": b,
     }
     ctx.code = (f"# project: {name} ({org})\n"
@@ -105,7 +136,7 @@ def list_projects(dry_run: bool = False, seed: int = 0, *, ctx: Ctx) -> None:
 
 @tool("skin.memory.brief", category="memory",
       summary="THE resume call: full project state in <=1500 tokens.")
-def brief(project_id: str = "", max_steps: int = 10, dry_run: bool = False,
+def brief(project_id: str = "", max_steps: int = 5, dry_run: bool = False,
           seed: int = 0, *, ctx: Ctx) -> None:
     """Return the project state: datasets, annotations, parameters, recent steps, flags.
 

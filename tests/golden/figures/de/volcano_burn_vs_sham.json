@@ -1,0 +1,19 @@
+{
+  "artifact_id": "art_5b5bcf1f",
+  "tool": "skin.plot.volcano_grid",
+  "project_id": "proj_6eafe484",
+  "dataset_id": null,
+  "caption": "volcano grid Burn vs Sham (sample inference)",
+  "params": {
+    "de_run_id": "de_6ccc4bd8",
+    "contrast": [
+      "Burn",
+      "Sham"
+    ],
+    "fdr": 0.05,
+    "lfc": 0.5,
+    "inference_level": "sample",
+    "method": "pydeseq2"
+  },
+  "created_at": "2026-08-04T06:14:20+00:00"
+}

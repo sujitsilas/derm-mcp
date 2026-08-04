@@ -106,11 +106,16 @@ def missing_counts(dataset_id: str) -> SkinMCPError:
     return MissingCounts(
         f"{dataset_id} has no layers['counts']",
         remedy=(
-            "Raw integer counts must be preserved for pseudobulk DE and re-normalization. "
-            "Re-load the object with skin.io.load_h5ad, or pass allow_no_counts=True to "
-            "accept a counts-free handle (DE and subclustering will then be unavailable)."
+            "Raw integer counts are required for pseudobulk DE, subclustering and "
+            "re-normalization, and cannot be recovered from log-normalized values. "
+            "There is no workaround to find: ASK THE USER for the raw counts matrix "
+            "(the CellRanger filtered_feature_bc_matrix .h5 or directory, or the "
+            ".h5ad this object was derived from), then attach it with "
+            "skin.io.attach_counts(dataset_id=..., path=...). If the user does not "
+            "have it, say so and offer skin.de.wilcoxon on the log-normalized values, "
+            "labelled exploratory — do not present that as pseudobulk DE."
         ),
-        suggested_tool="skin.io.load_h5ad",
+        suggested_tool="skin.io.attach_counts",
     )
 
 

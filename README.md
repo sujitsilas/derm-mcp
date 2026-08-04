@@ -51,6 +51,7 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 uv pip install --python .venv/bin/python -e ".[atlas]"   # CellTypist, CELLxGENE Census
 uv pip install --python .venv/bin/python -e ".[ccc]"     # LIANA
 uv pip install --python .venv/bin/python -e ".[traj]"    # CellRank
+uv pip install --python .venv/bin/python -e ".[memory]"  # mem0 semantic recall (opt-in)
 ```
 
 Verify:
@@ -66,8 +67,7 @@ Verify:
 # desktop / local clients
 skin-mcp --transport stdio
 
-# lab-shared instance (use a path that exists and is writable — on macOS the
-# root volume is read-only, so /data/... will fail with Errno 30)
+# lab-shared instance
 skin-mcp --transport http --host 0.0.0.0 --port 8931 --project-root ~/skinmcp-projects
 
 # a 30B local model does better with fewer schemas in context
@@ -79,11 +79,12 @@ skin-mcp --transport stdio --offline
 
 | flag | default | what it does |
 |---|---|---|
-| `--project-root` | `~/.skinmcp` | where projects, objects, figures and memory live |
-| `--profile` | `full` | `core` gates the advanced namespaces |
+| `--project-root` | `~/.skinmcp` | where projects, objects and memory live; figures and tables go beside the data unless `open_project(output_dir=...)` says otherwise |
+| `--profile` | `core` | `full` adds the advanced namespaces (124 tools vs 90) |
 | `--offline` | off | disables every network call; shipped snapshots only |
 | `--allow-raw-exec` | off | enables `skin.runtime.exec_r_raw` (arbitrary R) |
 | `--cache-objects` / `--cache-gb` | 3 / 16 | LRU cache of loaded AnnData |
+| `--data-dir` | none | directory searched when a bare filename is given; repeatable |
 
 ### Client configuration
 
@@ -94,7 +95,7 @@ skin-mcp --transport stdio --offline
   "mcpServers": {
     "skin-mcp": {
       "command": "/absolute/path/to/derm-mcp/.venv/bin/skin-mcp",
-      "args": ["--transport", "stdio", "--project-root", "/data/skinmcp"]
+      "args": ["--transport", "stdio"]
     }
   }
 }
@@ -113,13 +114,6 @@ skin-mcp --transport stdio --offline
 }
 ```
 
-If you use LM Studio's **GUI** instead of the JSON file, note that each
-"Argument" box is one argv token, not a shell string. `--profile core` typed into
-a single box arrives as the literal one-word option `"--profile core"`, argparse
-rejects it, the process exits, and you get `MCP error -32000: Connection closed`.
-Use four boxes — `--transport`, `stdio`, `--profile`, `core` — or just leave
-Arguments empty, since stdio is already the default.
-
 **Ollama / any HTTP client** — start with `--transport http` and point the client at
 `http://127.0.0.1:8931/mcp`.
 
@@ -128,25 +122,27 @@ Arguments empty, since stdio is already the default.
 > `--profile core` is recommended for models under ~70B. Tool schemas are context you
 > spend before the model has seen your data.
 
-### Troubleshooting `MCP error -32000: Connection closed`
+In a GUI client, each argument field is one argv token: use separate fields for
+`--profile` and `core`. Leaving arguments empty is valid — stdio and `~/.skinmcp`
+are the defaults.
 
-That message means the server process exited before completing the handshake. It is
-almost never a protocol problem — run the exact command your client is running, in a
-terminal, and read the error:
+---
 
-```bash
-/path/to/derm-mcp/.venv/bin/skin-mcp --transport stdio < /dev/null
+## Runtimes
+
+Python is managed by **uv**, R by **renv** — both created inside the project
+directory, versioned from the committed lockfiles.
+
+```
+skin.runtime.create(kind="python")   # uv venv   at {project}/runtimes/venv
+skin.runtime.create(kind="r")        # renv lib  at {project}/runtimes/renv
+skin.runtime.status()                # what exists, and where
+skin.runtime.manifest()              # the methods-section version table
 ```
 
-The two usual causes:
-
-| symptom in that output | cause | fix |
-|---|---|---|
-| `usage: skin-mcp [-h] ...` | an argument arrived as one token (`"--transport stdio"`) | one argv token per argument box |
-| `OSError: [Errno 30] Read-only file system` | `--project-root` points somewhere unwritable, e.g. `/data/...` on macOS | use `~/.skinmcp` (the default) or any path under your home |
-
-A bare invocation with no arguments is the most reliable starting point: stdio is the
-default transport and `~/.skinmcp` is created automatically.
+R-backed tools run with the project's renv library on `R_LIBS_USER`, so a script
+sees the versions that project pinned. `--data-dir` (repeatable) lets you pass a
+bare filename; loading a file also registers its directory.
 
 ---
 
@@ -339,14 +335,6 @@ low-complexity neutrophil population, keratin/collagen ambient in every cell, an
 deliberately mixed keratinocyte/fibroblast cluster — so the neutrophil warning,
 the ambient classification and the mixed-cluster branch all have something real to
 fire on. See `tests/golden/README.md`.
-
-The `.h5ad` itself is **not committed** (12.5 MB, and `*.h5ad` is gitignored). It is
-deterministic at `seed=0`, and `conftest.py` regenerates it on first use, so a fresh
-clone and CI both work with no extra step:
-
-```bash
-python tests/golden/make_golden.py   # optional; the fixture does it for you
-```
 
 ## License
 
