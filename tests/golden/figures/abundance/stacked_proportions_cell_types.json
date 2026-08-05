@@ -1,9 +1,0 @@
-{
-  "artifact_id": "art_a1b47ab4",
-  "tool": "skin.abundance.proportions",
-  "project_id": "proj_deecb6d6",
-  "dataset_id": "ds_5c45e3b6",
-  "caption": "stacked proportions of cell_types per sample",
-  "params": {},
-  "created_at": "2026-08-04T06:14:21+00:00"
-}

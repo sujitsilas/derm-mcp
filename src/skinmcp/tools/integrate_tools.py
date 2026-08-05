@@ -217,6 +217,20 @@ def preprocess(
                  f"the right answer. Prefer excluding genes, or modelling the covariate in "
                  f"the DE design.")
 
+    # Checked here rather than left to fail: zero-centering densifies, and the
+    # result is the single largest allocation in the whole pipeline.
+    dense_gb = registry.guard_dense(
+        adata, "sc.pp.scale",
+        remedy=(f"Do NOT retry — this fails the same way and risks the OS killing the "
+                f"server. Either free memory (unloading the local LLM is usually the "
+                f"largest win), or subset first: skin.sub.extract on one cell type gives "
+                f"a handle small enough to scale. Lowering n_hvg does not help; "
+                f"sc.pp.scale works on all {adata.n_vars} genes, not just the "
+                f"{n_hvg_found} variable ones."))
+    if dense_gb > 2.0:
+        ctx.warn(f"Scaling materialises a dense {dense_gb:.1f} GB matrix — the biggest "
+                 f"allocation in this pipeline. If the server has died here before, that "
+                 f"is why, and subsetting before preprocessing avoids it.")
     sc.pp.scale(adata, max_value=scale_max)
     registry.set_x_state(adata, "scaled")
     n_comps_eff = int(min(n_comps, max(2, min(adata.n_obs, n_hvg_found) - 1)))

@@ -18,6 +18,11 @@ dependencies = [
     "anndata>=0.10",
     "numpy>=1.26",
     "scipy>=1.11",
+    # pandas 3 resolves mode.string_storage="auto" to pyarrow whenever pyarrow is
+    # installed (several deps pull it in), which routes every .astype(str) and
+    # every categorical read through an allocator that segfaults instead of
+    # raising MemoryError. skinmcp/__init__.py pins the storage back to "python"
+    # at import; do not remove that without reading its docstring first.
     "pandas>=2.1",
     "h5py>=3.10",
     "scikit-learn>=1.4",
@@ -112,6 +117,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["T20"]
+# T20 bans print() because one in a tool corrupts the JSON-RPC stream on stdio.
+# Files under scripts/ are standalone CLI utilities, run directly and never
+# imported by the server, so printing is exactly what they are for.
+"scripts/*" = ["T20"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

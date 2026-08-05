@@ -16,10 +16,17 @@ Profile = Literal["core", "full"]
 
 #: Tool namespaces exposed under ``--profile core``. Everything else is gated,
 #: because a 30B model with 70 tool schemas in context stops calling tools well.
+#:
+#: The bar is "does a normal analysis need this?", not "is this simple?".
+#: `skin.abundance` was gated once and a session asking for a proportions plot —
+#: which `skin.abundance.proportions` produces directly — could not see the tool,
+#: improvised, and failed. Composition, export and runtime management are all part
+#: of ordinary work. What stays gated is genuinely specialist: cell-cell
+#: communication, trajectories, atlas mapping, benchmarking.
 CORE_NAMESPACES = frozenset(
     {"skin.help", "skin.memory", "skin.io", "skin.qc", "skin.meta", "skin.doublet",
      "skin.integrate", "skin.cluster", "skin.annotate", "skin.sub", "skin.de",
-     "skin.enrich", "skin.plot"}
+     "skin.enrich", "skin.plot", "skin.abundance", "skin.export", "skin.runtime"}
 )
 
 
@@ -111,6 +118,28 @@ class Config:
     # created inside the project directory; there is no container layer.
     allow_raw_exec: bool = False
 
+    #: Turn the R backend off entirely. Every R-backed tool then returns its
+    #: typed Python fallback immediately, without probing for an interpreter or
+    #: a library.
+    #:
+    #: Worth having as one switch rather than a half-built library: a partially
+    #: restored renv is *worse* than none, because tools discover it is broken
+    #: one `library()` call at a time, deep inside an analysis. Off means the
+    #: fallback is chosen up front, which is a supported path -- pseudobulk DE
+    #: uses PyDESeq2, doublets use scrublet, abundance uses milo_py.
+    disable_r: bool = field(default_factory=lambda: _env_bool("SKINMCP_DISABLE_R"))
+
+    #: Which Rscript to drive. Empty means "first on PATH".
+    #:
+    #: Bioconductor pins each release to one R minor version (3.20 -> R 4.4,
+    #: 3.23 -> R 4.6) and publishes binaries for that version only, so an
+    #: renv.lock and the R it was cut against are a matched pair. Taking
+    #: whatever is on PATH means a routine `brew upgrade r` silently
+    #: invalidates the lockfile. Pointing this at a specific interpreter — a
+    #: `rig`-managed R, a framework path, a wrapper script — makes the pairing
+    #: explicit and survives upgrades of the user's default R.
+    rscript: str = field(default_factory=lambda: _env_str("SKINMCP_RSCRIPT", ""))
+
     #: Directories to search when a caller gives a bare filename. Repeatable,
     #: and grown automatically as files are loaded, so "macs.h5ad" keeps working
     #: without the caller having to know the full path.
@@ -167,25 +196,56 @@ class Config:
 
     # --- pinned external versions (recorded in the manifest, not resolved live) ---
     census_version: str = "2025-01-30"
-    py_monocle_commit: str = "6a1b47f4b6e5d8c4f5a0f9e2f1c3d4a5b6c7d8e9"
+
+    def effective_cache_gb(self) -> float:
+        """The cache cap *right now*, not the one computed at start-up.
+
+        `cache_max_gb` is fixed when the server starts, but the local LLM that
+        drives it usually loads afterwards. One real session started with
+        41 GB free and sized the cache at 16 GB; six minutes later the model
+        was resident, 10 GB was free, and the cache was still working to a
+        16 GB budget the machine no longer had. Re-reading free RAM on every
+        eviction keeps the cache proportional to what is actually available,
+        and an explicit --cache-gb still acts as the ceiling.
+        """
+        free = available_ram_gb()
+        if free <= 0:
+            return self.cache_max_gb          # platform will not say; trust the flag
+        return max(1.0, min(self.cache_max_gb, free * 0.5))
 
     def project_dir(self, project_id: str) -> Path:
         return self.project_root / project_id
 
-    def runtime_dir(self, project_id: str) -> Path:
-        """Where this project's runtimes live: the uv venv and renv library."""
-        d = self.project_dir(project_id) / "runtimes"
+    def runtime_dir(self) -> Path:
+        """Where the managed runtimes live — one Python venv, one renv library.
+
+        Shared across projects, not per-project. Building them costs minutes and
+        hundreds of MB (the venv gets skin-mcp and all of scanpy/pydeseq2), and
+        on a single-user workstation there is no reason to pay that again for
+        every new project. Built once, then left alone.
+        """
+        d = self.project_root / "runtimes"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def project_venv(self, project_id: str) -> Path:
-        return self.runtime_dir(project_id) / "venv"
+    def shared_venv(self) -> Path:
+        return self.runtime_dir() / "python" / "venv"
 
-    def project_python(self, project_id: str) -> Path:
-        return self.project_venv(project_id) / "bin" / "python"
+    def shared_python(self) -> Path:
+        """The managed interpreter. Windows venvs use Scripts\\python.exe."""
+        venv = self.shared_venv()
+        win = venv / "Scripts" / "python.exe"
+        return win if win.exists() else venv / "bin" / "python"
 
-    def project_renv(self, project_id: str) -> Path:
-        return self.runtime_dir(project_id) / "renv"
+    def shared_renv(self) -> Path:
+        return self.runtime_dir() / "r"
+
+    def exec_dir(self, project_id: str) -> Path:
+        """Scratch for `exec_python` / `exec_r_raw` scripts. Per project: the code
+        is part of that project's record, even though the runtime is shared."""
+        d = self.project_dir(project_id) / "runtimes" / "exec"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
     def resolve_input(self, path: str) -> Path:
         """Resolve a user-supplied data path.

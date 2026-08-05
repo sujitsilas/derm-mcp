@@ -124,10 +124,19 @@ def detect_x_state(adata: AnnData) -> str:
 # --------------------------------------------------------------------------- #
 
 def _nbytes(adata: AnnData) -> int:
+    """Bytes held by X and the real layers.
+
+    `adata.layers` carries an entry keyed `None` that *is* X — anndata's way of
+    spelling "the default layer". Iterating `.values()` therefore yields X a
+    second time, and every cached object was being charged twice for its
+    largest matrix. The cache was not unsafe as a result, only wasteful: it
+    evicted objects it had room for and paid to re-read them.
+    """
     import scipy.sparse as sp
 
+    real_layers = [v for k, v in adata.layers.items() if k is not None]
     total = 0
-    for m in (adata.X, *adata.layers.values()):
+    for m in (adata.X, *real_layers):
         if m is None:
             continue
         if sp.issparse(m):
@@ -141,11 +150,12 @@ def _evict_if_needed() -> None:
     while len(_CACHE) > CONFIG.cache_max_objects:
         k, _ = _CACHE.popitem(last=False)
         logger.info("evicting %s from AnnData cache (object count)", k)
-    while _CACHE and sum(_nbytes(a) for a in _CACHE.values()) > CONFIG.cache_max_gb * 1e9:
+    budget = CONFIG.effective_cache_gb() * 1e9
+    while _CACHE and sum(_nbytes(a) for a in _CACHE.values()) > budget:
         if len(_CACHE) == 1:
             break  # a single object over the limit still has to be usable
         k, _ = _CACHE.popitem(last=False)
-        logger.info("evicting %s from AnnData cache (size)", k)
+        logger.info("evicting %s from AnnData cache (size, budget %.1f GB)", k, budget / 1e9)
 
 
 def cache_put(dataset_id: str, adata: AnnData) -> None:
@@ -264,6 +274,123 @@ def bad_handle(project_id: str, ref: str) -> InvalidHandle:
     )
 
 
+def estimate_resident_bytes(path: Path) -> int:
+    """How much RAM reading this .h5ad will actually cost, read from its header.
+
+    Deliberately measured rather than guessed from the file size: compression
+    ratios vary by an order of magnitude between lzf, gzip and none, so a
+    size-based rule either refuses files that fit or waves through ones that do
+    not. Sums the matrices only (X plus every layer), which dominate — obs/var
+    are megabytes beside gigabytes. Returns 0 when the header cannot be read,
+    which the caller treats as "unknown, proceed".
+    """
+    import h5py
+
+    def _elem(g: Any) -> int:
+        if isinstance(g, h5py.Dataset):                      # dense
+            n = 1
+            for d in g.shape:
+                n *= int(d)
+            return n * g.dtype.itemsize
+        if isinstance(g, h5py.Group) and "data" in g:        # csr/csc
+            data = g["data"]
+            # values + int32 indices + indptr (negligible)
+            return int(data.shape[0]) * (data.dtype.itemsize + 4)
+        return 0
+
+    total = 0
+    try:
+        with h5py.File(path, "r") as f:
+            if "X" in f:
+                total += _elem(f["X"])
+            if "layers" in f:
+                for k in f["layers"]:
+                    total += _elem(f["layers"][k])
+    except (OSError, KeyError, AttributeError, TypeError) as e:
+        logger.debug("could not size %s: %s", path, e)
+        return 0
+    return total
+
+
+def _admit(resolved: str, path: Path) -> None:
+    """Refuse a load that cannot fit, rather than being killed attempting it.
+
+    Without this the failure mode is not a MemoryError — it is the OS or a
+    native allocator taking the whole process down, which the host reports only
+    as "MCP error -32000: Connection closed", losing every result in the
+    session. A typed refusal keeps the server answering and tells the caller
+    what to do about it.
+    """
+    from .config import available_ram_gb
+    from .errors import wont_fit
+
+    need = estimate_resident_bytes(path)
+    free = available_ram_gb() * 1e9
+    if need <= 0 or free <= 0:
+        return                                   # cannot measure; do not block
+    if need > free * 0.5:
+        # Reclaim what we control before declaring defeat: cached objects are
+        # on disk already, so dropping them costs a re-read, not the analysis.
+        logger.info("%s needs %.1f GB with %.1f GB free — clearing the AnnData cache",
+                    resolved, need / 1e9, free / 1e9)
+        cache_clear()
+        free = available_ram_gb() * 1e9
+    # read_h5ad needs headroom above the final object for decompression
+    # buffers, so refuse well before the object alone would fill memory.
+    if need > free * 0.8:
+        raise wont_fit(resolved, need / 1e9, free / 1e9)
+
+
+def admit_external(path: Path) -> None:
+    """`_admit` for a file the user pointed at, before it has a handle."""
+    _admit(Path(path).name, Path(path))
+
+
+def guard_dense(adata: AnnData, op: str, *, remedy: str = "", itemsize: int = 4) -> float:
+    """Refuse an operation that would densify a matrix too big to hold.
+
+    Returns the projected size in GB so the caller can report it.
+
+    Sparse single-cell matrices are 5-10% dense, so materialising one costs an
+    order of magnitude more than it occupies. `sc.pp.scale` is the usual
+    culprit: zero-centering cannot be done in place on a sparse matrix, so
+    scanpy densifies, and a 78k x 20k object becomes 6.4 GB on top of the
+    sparse original, its lognorm copy and `adata.raw`.
+
+    Unlike a segfault, this failure is an OS kill. faulthandler cannot catch
+    SIGKILL, so it leaves no traceback and no crash log -- the server simply
+    stops mid-call and the host reports a closed connection. There is no way to
+    handle it after the fact, which is why it has to be refused beforehand.
+    """
+    from .config import available_ram_gb
+    from .errors import InsufficientMemory
+
+    need = float(adata.n_obs) * float(adata.n_vars) * itemsize
+    free = available_ram_gb() * 1e9
+    need_gb = need / 1e9
+    if free <= 0:
+        return need_gb                          # cannot measure; do not block
+    if need > free * 0.5:
+        cache_clear()
+        free = available_ram_gb() * 1e9
+    if need > free * 0.7:
+        raise InsufficientMemory(
+            f"{op} would densify a {adata.n_obs} x {adata.n_vars} matrix, which needs "
+            f"about {need_gb:.1f} GB on top of what is already held, and only "
+            f"{free / 1e9:.1f} GB is free",
+            remedy=remedy or (
+                "Do NOT retry — this fails the same way and risks the OS killing the "
+                "server mid-analysis, losing the session. Free memory first (unloading "
+                "the local LLM is usually the largest single win), or work on a smaller "
+                "object: skin.sub.extract on one compartment produces a handle that "
+                "fits comfortably."),
+            suggested_tool="skin.sub.extract",
+            details={"needed_gb": round(need_gb, 2), "free_gb": round(free / 1e9, 2),
+                     "n_obs": int(adata.n_obs), "n_vars": int(adata.n_vars)},
+        )
+    return need_gb
+
+
 def load(project_id: str, dataset_id: str, *, copy: bool = False) -> AnnData:
     """Resolve a handle (or a human label) to an in-memory AnnData."""
     import anndata as ad
@@ -283,9 +410,45 @@ def load(project_id: str, dataset_id: str, *, copy: bool = False) -> AnnData:
             remedy="The project directory may have moved. Re-run the step that produced it, "
                    "or re-load the source data with skin.io.load_h5ad.",
         )
+    _admit(resolved, path)
     adata = ad.read_h5ad(path)
     cache_put(resolved, adata)
     return adata.copy() if copy else adata
+
+
+def peek(project_id: str, dataset_id: str) -> AnnData:
+    """Open a handle for *metadata only* — obs, var, shape, keys. Never the matrix.
+
+    `describe` used to go through `load()`, which reads the whole object: 2.7 GB
+    for a 78k x 20k file, just to list obs columns. Beside a resident local LLM
+    that was enough to kill the server mid-call, and the crash log showed exactly
+    that stack (read_h5ad <- registry.load <- io_tools.describe).
+
+    Backed mode reads the same metadata for a fraction of the memory. The result
+    is deliberately NOT cached: it holds an open file handle, and callers that
+    need the matrix should use `load()`.
+    """
+    import anndata as ad
+
+    resolved = store.resolve_dataset_ref(project_id, dataset_id)
+    if resolved is None:
+        raise bad_handle(project_id, dataset_id)
+    with _LOCK:
+        cached = _CACHE.get(resolved)
+    if cached is not None:
+        return cached                      # already in memory; nothing to save
+    path = object_path(project_id, resolved)
+    if not path.exists():
+        raise InvalidHandle(
+            f"{resolved} is registered but its .h5ad is missing at {path}",
+            remedy="The project directory may have moved. Re-run the step that "
+                   "produced it, or re-load with skin.io.load_h5ad.")
+    try:
+        return ad.read_h5ad(path, backed="r")
+    except (OSError, ValueError, TypeError):
+        # Some objects cannot be opened backed (odd dtypes, older writers).
+        # Correctness beats the memory saving.
+        return load(project_id, resolved)
 
 
 def mint(
@@ -322,17 +485,29 @@ def mint(
     u["op"] = op
     u["project_id"] = project_id
 
-    notes: list[str] = []
-    if not path.exists():
-        notes = _sanitize_for_h5ad(adata)
-        try:
-            adata.write_h5ad(path, compression=CONFIG.h5ad_compression)
-        except Exception:
-            # Never leave a half-written .h5ad behind: the handle would be
-            # registered but unreadable, and every later load would fail with a
-            # confusing error far from the cause.
-            path.unlink(missing_ok=True)
-            raise
+    # Written every time, not only when the path is new. The handle is
+    # content-addressed on (parent, op, params) — which does not include the
+    # *code*, so a fixed tool recomputes a different object under the same id.
+    # Skipping the write then left the freshly computed object in the cache
+    # while the stale one stayed on disk: same handle, two different answers
+    # depending on whether the server had restarted. That is exactly the
+    # irreproducibility the registry exists to prevent, and it is silent.
+    #
+    # The write is not the expensive part — by the time we are here the work has
+    # already been redone, so re-serialising costs a fraction of a second (lzf)
+    # against a guarantee that a handle means one thing.
+    notes = _sanitize_for_h5ad(adata)
+    tmp = path.with_suffix(".h5ad.tmp")
+    try:
+        adata.write_h5ad(tmp, compression=CONFIG.h5ad_compression)
+        tmp.replace(path)
+    except Exception:
+        # Never leave a half-written .h5ad behind: the handle would be
+        # registered but unreadable, and every later load would fail with a
+        # confusing error far from the cause. Writing to a temporary first also
+        # means an interrupted rewrite cannot destroy a good existing object.
+        tmp.unlink(missing_ok=True)
+        raise
     _TLS.mint_notes = notes
 
     store.upsert_dataset(

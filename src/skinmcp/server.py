@@ -274,6 +274,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="disable every network call; use shipped snapshots")
     ap.add_argument("--allow-raw-exec", action="store_true",
                     help="enable skin.runtime.exec_r_raw (arbitrary R). Off by default.")
+    ap.add_argument("--no-r", action="store_true",
+                    help="switch the R backend off; every R-backed tool returns its "
+                         "pure-Python equivalent immediately. Also SKINMCP_DISABLE_R.")
+    ap.add_argument("--rscript", default=None,
+                    help="Rscript to drive (default: first on PATH). Pin this to the R "
+                         "minor version renv.lock targets — e.g. a rig-managed "
+                         "~/.local/bin/R-4.4 — so upgrading your default R does not "
+                         "invalidate the lockfile. Also SKINMCP_RSCRIPT.")
     ap.add_argument("--data-dir", action="append", default=[],
                     help="directory to search when a bare filename is given. Repeatable.")
     ap.add_argument("--cache-objects", type=int, default=None)
@@ -290,6 +298,10 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(args.log_level, CONFIG.project_root / "logs")
     CONFIG.offline = bool(args.offline)
     CONFIG.allow_raw_exec = bool(args.allow_raw_exec)
+    if args.no_r:
+        CONFIG.disable_r = True
+    if args.rscript:
+        CONFIG.rscript = args.rscript
     for d in args.data_dir:
         dp = Path(d).expanduser().resolve()
         if not dp.is_dir():
@@ -315,6 +327,17 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("memory: %.1f GB total, %s free; AnnData cache capped at %.1f GB / %d objects",
                 total_ram_gb(), f"{avail:.1f} GB" if avail else "unknown",
                 CONFIG.cache_max_gb, CONFIG.cache_max_objects)
+    # Worth a line because the failure it prevents leaves no other trace: with
+    # pyarrow-backed strings, an allocation failure is a SIGSEGV, and the only
+    # symptom anyone can report is "Connection closed". See skinmcp/__init__.py.
+    import pandas as pd
+
+    storage = pd.get_option("mode.string_storage")
+    logger.info("pandas %s, string storage=%s", pd.__version__, storage)
+    if storage != "python":
+        logger.warning("pandas string storage is %r, so string and categorical work runs "
+                       "through pyarrow, whose allocation failures segfault the process "
+                       "instead of raising. Unset SKINMCP_ALLOW_ARROW_STRINGS.", storage)
     if avail and avail < 4.0:
         logger.warning("only %.1f GB of RAM is free — a large .h5ad may not fit. If the "
                        "connection drops mid-analysis, free memory (e.g. unload the local "

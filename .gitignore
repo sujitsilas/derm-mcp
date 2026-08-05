@@ -124,3 +124,10 @@ tmp/
 # vendored source. A local clone here is only for reading or patching upstream;
 # it must not be committed, and nothing in skinmcp imports from it by path.
 mem0-main/
+
+# Milo writes one figure per parameter hash, so every test run mints a new
+# filename instead of overwriting. 234 of them had accumulated (35 MB), 84
+# already committed. Nothing reads them -- tests assert on the data behind the
+# figures, not the files -- so they are output, not fixtures.
+tests/golden/figures/**/milo_beeswarm_da_*
+tests/golden/figures/**/milo_nhood_graph_da_*

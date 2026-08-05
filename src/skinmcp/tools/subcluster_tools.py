@@ -10,6 +10,7 @@ features for the compartment you actually care about.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from .. import registry
@@ -88,6 +89,24 @@ def extract(dataset_id: str, label_key: str, labels: list[str], new_label: str =
               "variances_norm", "highly_variable_nbatches"):
         if c in sub.var.columns:
             del sub.var[c]
+    # Inherited cluster assignments are renamed for the same reason the parent's
+    # HVGs and PCA are dropped: they answer a different question. What survives a
+    # subset is not "the clusters of these cells" but "which whole-tissue clusters
+    # these cells happened to fall into" -- on a real neutrophil subset, 5 of the
+    # parent's 24 leiden labels remained, sitting next to a freshly computed
+    # leiden_res0.4 with 9. Nothing in the names says which is which, so a caller
+    # asked to run DE "between clusters" can pick the stale one and get a
+    # confidently wrong answer, which is worse than an error. Renamed rather than
+    # deleted so the parent's assignment stays available and auditable.
+    renamed = {}
+    for c in list(sub.obs.columns):
+        if c == label_key or c.startswith("parent_"):
+            continue
+        if re.match(r"^(leiden|louvain)([_.]|$)", str(c), re.IGNORECASE):
+            renamed[c] = f"parent_{c}"
+    if renamed:
+        sub.obs = sub.obs.rename(columns=renamed)
+
     # Drop now-empty categories so downstream groupbys do not produce empty groups.
     import pandas as pd
 
@@ -105,6 +124,12 @@ def extract(dataset_id: str, label_key: str, labels: list[str], new_label: str =
     ctx.warn("X reset to raw counts and the parent's feature selection/embeddings were "
              "dropped. Run skin.integrate.preprocess next to re-select HVGs for this "
              "compartment.")
+    if renamed:
+        ctx.warn(
+            f"The parent's cluster assignments were renamed to "
+            f"{sorted(renamed.values())} because they describe the whole tissue, not "
+            f"this compartment. Do NOT group, plot or run DE on them — cluster this "
+            f"subset with skin.cluster.leiden and use the column that produces.")
     ctx.suggest("skin.integrate.preprocess", "skin.sub.pipeline")
 
 

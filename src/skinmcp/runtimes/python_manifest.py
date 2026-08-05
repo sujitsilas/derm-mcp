@@ -7,6 +7,7 @@ a running interpreter, so invalidation is unnecessary.
 
 from __future__ import annotations
 
+import importlib.metadata
 import platform
 import sys
 from functools import lru_cache
@@ -90,7 +91,29 @@ def full_manifest() -> dict[str, object]:
             "packages": _all_versions(),
         },
         "pinned": {
-            "py_monocle_commit": CONFIG.py_monocle_commit,
+            "py_monocle": _py_monocle_provenance(),
             "cellxgene_census_version": CONFIG.census_version,
         },
     }
+
+
+def _py_monocle_provenance() -> str:
+    """Which trajectory implementation is actually available, resolved now.
+
+    This used to publish a hardcoded `py_monocle_commit`, which was not a real
+    commit in bioturing-org/py-monocle — and nothing ever fetched it, because
+    skin.traj.monocle imports upstream py_monocle when installed and otherwise
+    uses the shipped implementation. A commit hash that names nothing is worse
+    than no hash at all here: `full_manifest` is what gets pasted into a methods
+    section, so a reader would cite a commit that cannot be checked out.
+    """
+    try:
+        return f"upstream py_monocle {importlib.metadata.version('py-monocle')}"
+    except importlib.metadata.PackageNotFoundError:
+        pass
+    try:
+        import py_monocle  # type: ignore  # noqa: F401
+    except ImportError:
+        return ("shipped implementation (SimplePPT, Mao et al. SDM 2015; monocle3, "
+                "Cao et al. Nature 2019) — upstream py-monocle not installed")
+    return "upstream py_monocle (version not reported)"

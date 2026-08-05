@@ -65,10 +65,21 @@ def test_full_profile_is_a_superset():
     finally:
         CONFIG.profile = old
     assert core < full, "full must expose strictly more than core"
+    # Only genuinely specialist namespaces may be gated. Composition, export and
+    # runtime management are ordinary work: gating skin.abundance once left a
+    # session unable to find skin.abundance.proportions when asked for exactly
+    # that plot, so it improvised and failed.
     assert {n.rsplit(".", 1)[0] for n in full - core} <= {
-        "skin.ccc", "skin.traj", "skin.atlas", "skin.runtime", "skin.abundance",
-        "skin.export", "skin.report", "skin.bench",
+        "skin.ccc", "skin.traj", "skin.atlas",
     }, sorted(full - core)
+
+
+def test_core_carries_the_tools_a_normal_analysis_needs():
+    """Regression: these were gated and a real session broke on their absence."""
+    names = {t.name for t in asyncio.run(build_server().list_tools())}
+    for expected in ("skin.abundance.proportions", "skin.export.notebook",
+                     "skin.runtime.create", "skin.runtime.status"):
+        assert expected in names, f"{expected} is gated out of the default profile"
 
 
 def test_prompts_list_and_get(mcp):

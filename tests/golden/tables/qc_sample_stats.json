@@ -1,9 +1,0 @@
-{
-  "artifact_id": "art_6a3e3783",
-  "tool": "skin.qc.sample_stats",
-  "project_id": "proj_4d1cb905",
-  "dataset_id": "ds_c93e7095",
-  "caption": "per-sample QC statistics",
-  "params": {},
-  "created_at": "2026-08-04T06:14:48+00:00"
-}

@@ -255,6 +255,7 @@ def load_h5ad(path: str, organism: str = "mouse", counts_layer: str = "counts",
         ctx.summary = {"path": str(p)}
         return
 
+    registry.admit_external(p)
     adata = ad.read_h5ad(p)
     if counts_layer != "counts" and counts_layer in adata.layers:
         adata.layers["counts"] = adata.layers.pop(counts_layer)
@@ -642,7 +643,10 @@ def describe(dataset_id: str, project_id: str = "", dry_run: bool = False, seed:
         dry_run: No effect.
         seed: Unused.
     """
-    adata = registry.load(ctx.project_id, dataset_id)
+    # peek, not load: this reports obs/var/shape and never touches the matrix,
+    # and reading a 78k x 20k object in full to list its columns was enough to
+    # take the server down beside a resident local model.
+    adata = registry.peek(ctx.project_id, dataset_id)
     resolved = store.resolve_dataset_ref(ctx.project_id, dataset_id) or dataset_id
     row = store.get_dataset(ctx.project_id, resolved)
     ctx.dataset_id = resolved

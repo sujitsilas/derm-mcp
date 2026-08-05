@@ -1,5 +1,18 @@
 # CellChat chord diagram. skin.ccc.plot_chord().
-source(file.path(dirname(sys.frame(1)$ofile %||% "."), "_common.R"))
+# Locating this script's own directory has to work when Rscript runs the file
+# directly, which is how bridge.py invokes it: `Rscript <script>.R <work_dir>`.
+# `sys.frame(1)$ofile` only exists under source(), and at top level it aborts
+# with "not that many frames on the stack" -- so every vetted script failed on
+# line 2, before loading a package or reading an argument.
+.skin_script_dir <- function() {
+  a <- commandArgs(trailingOnly = FALSE)
+  f <- sub("^--file=", "", a[grepl("^--file=", a)])
+  if (length(f)) return(dirname(normalizePath(f[[1]])))
+  of <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
+  if (!is.null(of)) return(dirname(normalizePath(of)))
+  "."
+}
+source(file.path(.skin_script_dir(), "_common.R"))
 `%||%` <- function(a, b) if (is.null(a)) b else a
 suppressPackageStartupMessages({ library(CellChat) })
 

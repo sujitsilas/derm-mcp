@@ -80,12 +80,23 @@ def test_mcp_schemas_are_small():
 
 
 def test_core_profile_is_small_enough():
-    """`--profile core` must expose a set a 30B model can hold in context."""
+    """`--profile core` must expose a set a 30B model can hold in context.
+
+    The ceiling moved from 95 to 110 when composition, export and runtime were
+    promoted into core: gating `skin.abundance` had left a real session unable to
+    find `skin.abundance.proportions` when asked for exactly that plot, and a
+    missing tool is a worse failure than a long list — the model improvises and
+    burns the whole budget, whereas a long list only makes it slower to choose.
+
+    If selection does start to degrade, the fix is trimming rarely-used tools out
+    of `skin.io` / `skin.meta` (one session reached for `set_label` when it wanted
+    `load_h5ad`), NOT re-gating whole workflow namespaces.
+    """
     old = CONFIG.profile
     try:
         CONFIG.profile = "core"
         n = sum(1 for n in NAMES if CONFIG.namespace_enabled(n))
-        assert n <= 95, f"core profile exposes {n} tools"
+        assert n <= 110, f"core profile exposes {n} tools"
         assert n >= 40, f"core profile exposes only {n} tools; too little to work with"
     finally:
         CONFIG.profile = old

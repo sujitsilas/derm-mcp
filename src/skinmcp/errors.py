@@ -28,6 +28,7 @@ ErrorCode = Literal[
     "CONFIRMATION_REQUIRED",
     "DEPENDENCY_MISSING",
     "NOT_FOUND",
+    "INSUFFICIENT_MEMORY",
     "INTERNAL",
 ]
 
@@ -83,6 +84,7 @@ BadParam = _mk("BadParam", "BAD_PARAM")
 ConfirmationRequired = _mk("ConfirmationRequired", "CONFIRMATION_REQUIRED")
 DependencyMissing = _mk("DependencyMissing", "DEPENDENCY_MISSING")
 NotFound = _mk("NotFound", "NOT_FOUND")
+InsufficientMemory = _mk("InsufficientMemory", "INSUFFICIENT_MEMORY")
 
 
 # --------------------------------------------------------------------------- #
@@ -139,6 +141,24 @@ def r_unavailable(reason: str, python_fallback: str) -> SkinMCPError:
             f"fallback `{python_fallback}`, which needs no container."
         ),
         suggested_tool=python_fallback,
+    )
+
+
+def wont_fit(dataset_id: str, need_gb: float, free_gb: float) -> SkinMCPError:
+    return InsufficientMemory(
+        f"{dataset_id} needs about {need_gb:.1f} GB in memory but only "
+        f"{free_gb:.1f} GB is free",
+        remedy=(
+            "Do NOT retry this call — it will fail the same way, and pressing on is how "
+            "the server gets killed mid-analysis instead of answering. Free memory first: "
+            "unload the local LLM (or pick a smaller one), close other large processes, "
+            "and call skin.runtime.status to re-check. skin.io.describe reads only "
+            "metadata and works regardless. If the object is simply too big for this "
+            "machine, subset it once with skin.sub.extract on a smaller label set and "
+            "work from that handle."
+        ),
+        suggested_tool="skin.io.describe",
+        details={"needed_gb": round(need_gb, 2), "free_gb": round(free_gb, 2)},
     )
 
 

@@ -22,15 +22,16 @@ skin_params <- function(work) {
   fromJSON(p, simplifyVector = TRUE)
 }
 
-# Primary I/O path is zellkonverter; the mtx export is the documented fallback
-# for objects the h5ad round-trip chokes on.
+# Plain files are the only transport, in both directions.
+#
+# This used to prefer zellkonverter::readH5AD and fall back to mtx. zellkonverter
+# reaches Python through basilisk/reticulate, so it carries an entire second
+# runtime to go wrong -- on this machine it did, trying to provision Python
+# 3.14.0 through pyenv and failing before it read a single cell. A converter
+# whose failure mode is "could not install an interpreter" is the wrong
+# dependency for a data handoff between two runtimes that are both already
+# installed and working.
 skin_read_sce <- function(work) {
-  mode_f <- file.path(work, "io_mode.txt")
-  mode <- if (file.exists(mode_f)) readLines(mode_f, warn = FALSE)[1] else "h5ad"
-  if (identical(mode, "h5ad") && file.exists(file.path(work, "input.h5ad"))) {
-    suppressPackageStartupMessages(library(zellkonverter))
-    return(readH5AD(file.path(work, "input.h5ad"), reader = "R"))
-  }
   d <- file.path(work, "input_mtx")
   if (!dir.exists(d)) stop("no input object found in ", work)
   suppressPackageStartupMessages(library(SingleCellExperiment))
