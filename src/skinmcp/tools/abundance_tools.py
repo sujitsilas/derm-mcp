@@ -354,8 +354,8 @@ def _milo_nhood_graph(ctx: Ctx, adata: Any, df: Any, idx: Any, a: str, b: str,
 def proportions(dataset_id: str, label_key: str, sample_key: str = "Sample",
                 group_keys: list[str] | None = None, transform: str = "arcsine",
                 test: str = "welch", split_by: str = "", make_plots: bool = True,
-                project_id: str = "", dry_run: bool = False, seed: int = 0,
-                *, ctx: Ctx) -> None:
+                bar_by: str = "", project_id: str = "", dry_run: bool = False,
+                seed: int = 0, *, ctx: Ctx) -> None:
     """Per-sample composition table, tests, stacked bars and timepoint lines.
 
     n is samples, not cells. Proportions are compositional (they sum to 1), so
@@ -372,6 +372,15 @@ def proportions(dataset_id: str, label_key: str, sample_key: str = "Sample",
         test: "welch" (Welch t-test) or "mannwhitney".
         split_by: Optional obs column to facet the line plot by.
         make_plots: Render the stacked bars and line plots.
+        bar_by: Draw ONE bar per level of this obs column instead of one per
+            sample — e.g. "Type_Timepoint" for eight bars rather than twenty-one.
+            Bars are the mean of the per-sample proportions, so the replicate
+            structure is untouched: `sample_key` remains the unit of analysis and
+            the statistics are unchanged. Bar order follows the column's category
+            order, so skin.meta.order_categorical sets it (Sham_D7, Burn_D7, ...).
+            Do NOT get this effect by passing a group column as `sample_key`:
+            that makes each group a single replicate and silently destroys every
+            p-value in the table.
         project_id: Defaults to the active project.
         dry_run: Report the design only.
         seed: RNG seed.
@@ -464,7 +473,8 @@ def proportions(dataset_id: str, label_key: str, sample_key: str = "Sample",
 
     figs = []
     if make_plots:
-        figs.append(_stacked_bars(ctx, props, labels, sample_key, gk, label_key, adata))
+        figs.append(_stacked_bars(ctx, props, labels, sample_key, gk, label_key,
+                                  adata, bar_by=bar_by))
         if len(gk) >= 2:
             figs.append(_proportion_lines(ctx, props, labels, gk, stats_rows, label_key, adata))
 
@@ -486,14 +496,64 @@ def proportions(dataset_id: str, label_key: str, sample_key: str = "Sample",
 
 
 def _stacked_bars(ctx: Ctx, props: Any, labels: list[str], sample_key: str,
-                  gk: list[str], label_key: str, adata: Any) -> dict[str, Any] | None:
+                  gk: list[str], label_key: str, adata: Any,
+                  bar_by: str = "") -> dict[str, Any] | None:
     import matplotlib.pyplot as plt
     import numpy as np
+    import pandas as pd
     from matplotlib.ticker import PercentFormatter
 
     pal = PAL.get_from_adata(adata, label_key) or PAL.celltype_palette(labels)
-    sort_cols = [c for c in gk if c in props.columns] + [sample_key]
-    d = props.sort_values(sort_cols)
+    x_key = sample_key
+    if bar_by and bar_by not in props.columns:
+        # props carries sample_key and the design columns, so a composite like
+        # "Type_Timepoint" is usually absent. It is constant within a sample by
+        # construction, so it can be mapped across — but only if it really is
+        # constant, otherwise the bar would average across different groups.
+        if bar_by in adata.obs.columns:
+            per = (adata.obs.groupby(sample_key, observed=True)[bar_by]
+                   .agg(lambda s: s.astype(str).mode().iloc[0]))
+            nun = adata.obs.groupby(sample_key, observed=True)[bar_by].nunique()
+            if (nun > 1).any():
+                ctx.warn(f"{bar_by} is not constant within {sample_key} "
+                         f"({int((nun > 1).sum())} samples span several levels); bars stay "
+                         f"per {sample_key} rather than averaging across groups.")
+                bar_by = ""
+            else:
+                src_cat = adata.obs[bar_by]
+                props = props.copy()
+                props[bar_by] = props[sample_key].astype(str).map(per.to_dict())
+                if isinstance(src_cat.dtype, pd.CategoricalDtype):
+                    props[bar_by] = pd.Categorical(
+                        props[bar_by], categories=list(src_cat.cat.categories), ordered=True)
+        else:
+            ctx.warn(f"bar_by={bar_by!r} is not an obs column; bars stay per {sample_key}.")
+            bar_by = ""
+    if bar_by and bar_by in props.columns:
+        # One bar per group: the mean of the per-sample proportions, which is
+        # what a reader expects a group bar to mean. Averaging the proportions
+        # rather than pooling cells keeps every sample weighted equally, so a
+        # deeply sequenced mouse does not quietly become the group.
+        d = (props.groupby(bar_by, observed=True)[labels].mean().reset_index())
+        n_per = props.groupby(bar_by, observed=True).size()
+        # Order follows the column's own categories, so
+        # skin.meta.order_categorical is what sets it.
+        src = props[bar_by]
+        order = (list(src.cat.categories) if isinstance(src.dtype, pd.CategoricalDtype)
+                 else PAL.natural_order(src.astype(str).unique()))
+        order = [o for o in order if o in set(d[bar_by].astype(str))]
+        d[bar_by] = pd.Categorical(d[bar_by].astype(str), categories=order, ordered=True)
+        d = d.sort_values(bar_by)
+        x_key = bar_by
+        bar_info = {"bar_by": bar_by, "n_bars": int(len(d)),
+                    "samples_per_bar": {str(k): int(v) for k, v in n_per.items()}}
+        ctx.warn(f"Bars are group means over {sample_key} ({len(d)} bars). The table and "
+                 f"every p-value are still computed per {sample_key}; only the drawing "
+                 f"is aggregated.")
+    else:
+        bar_info = {}
+        sort_cols = [c for c in gk if c in props.columns] + [sample_key]
+        d = props.sort_values(sort_cols)
     x = np.arange(len(d))
     with style("standard"):
         fig, ax = plt.subplots(figsize=(max(6, 0.42 * len(d) + 3), 6))
@@ -504,17 +564,20 @@ def _stacked_bars(ctx: Ctx, props: Any, labels: list[str], sample_key: str,
                    label=lab, edgecolor="white", linewidth=0.4)
             bottom += v
         ax.set_xticks(x)
-        ax.set_xticklabels(d[sample_key].astype(str), rotation=90, fontsize=11)
+        ax.set_xticklabels(d[x_key].astype(str), rotation=90, fontsize=11)
         ax.set_ylim(0, 1)
         ax.yaxis.set_major_formatter(PercentFormatter(1.0))
         ax.set_ylabel("Proportion of cells", fontsize=18, fontweight="bold")
         ax.legend(frameon=False, fontsize=11, loc="center left", bbox_to_anchor=(1.01, 0.5))
         fig.tight_layout()
-        paths = savefig(fig, ctx.figdir("abundance") / f"stacked_proportions_{label_key}")
+        suffix = f"_by_{bar_by}" if bar_by else ""
+        paths = savefig(fig,
+                        ctx.figdir("abundance") / f"stacked_proportions_{label_key}{suffix}")
         plt.close(fig)
     aid = ctx.add_artifact("figure", paths["pdf"],
-                           caption=f"stacked proportions of {label_key} per sample")
-    return {"kind": "stacked_bars", "artifact_id": aid, "paths": paths}
+                           caption=f"stacked proportions of {label_key} per "
+                                   f"{bar_by or sample_key}")
+    return {"kind": "stacked_bars", "artifact_id": aid, "paths": paths, **bar_info}
 
 
 def _proportion_lines(ctx: Ctx, props: Any, labels: list[str], gk: list[str],
